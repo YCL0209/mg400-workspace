@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Reference fork — 外部唯讀協定字典，獨立追蹤於
+# github.com/YCL0209/TCP-IP-4Axis-Python（CLAUDE.md 規定唯讀、不沿用）
+/reference/
+
+# macOS
+.DS_Store
+
+# Claude 本地設定（若日後新增共用 settings.json 仍可被追蹤）
+.claude/settings.local.json

@@ -1,0 +1,3 @@
+# Runtime dependencies for the MG400 platform.
+# numpy parses the 1440-byte binary feedback frame (robot_core/transport/feedback.py).
+numpy>=1.24

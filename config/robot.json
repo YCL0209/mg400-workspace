@@ -1,0 +1,14 @@
+{
+  "ip": "192.168.1.6",
+  "ports": {
+    "dashboard": 29999,
+    "move": 30003,
+    "feedback": 30004
+  },
+  "transport": {
+    "connect_timeout_s": 3.0,
+    "recv_timeout_s": 5.0,
+    "max_retries": 3,
+    "retry_backoff_s": 0.5
+  }
+}
