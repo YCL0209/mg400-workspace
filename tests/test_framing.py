@@ -11,6 +11,7 @@ from robot_core.transport.connection import (
     ConnectionClosedError,
     FramedConnection,
     NotConnectedError,
+    TcpConnection,
     TransportError,
 )
 from robot_core.transport.framing import extract_frames
@@ -193,6 +194,39 @@ class ConnectRetryTests(unittest.TestCase):
         conn.connect()
         self.assertTrue(conn.is_connected)
         self.assertEqual(calls["n"], 3)
+
+
+class RecvExactTests(unittest.TestCase):
+    """Cover TcpConnection.recv_exact's multi-recv accumulation loop directly.
+
+    Feedback frames are a fixed 1440 bytes that the OS may hand over in several
+    chunks; on real hardware at high frequency this loop is always exercised.
+    The earlier feedback test used a FakeConn that returned the whole payload at
+    once, which bypassed this path.
+    """
+
+    def _conn(self, recv_chunks):
+        sock = FakeSocket(recv_chunks=recv_chunks)
+        conn = TcpConnection(
+            "192.0.2.1", 30004, sock_factory=lambda: sock, retry_backoff_s=0
+        )
+        conn.connect()
+        return conn, sock
+
+    def test_reassembles_fixed_size_payload_across_chunks(self):
+        payload = bytes((i % 256) for i in range(1440))
+        # 1440 split as 500 + 500 + 440, delivered one chunk per recv().
+        chunks = [payload[:500], payload[500:1000], payload[1000:]]
+        conn, _ = self._conn(chunks)
+        result = conn.recv_exact(1440)
+        self.assertEqual(len(result), 1440)
+        self.assertEqual(result, payload)
+
+    def test_raises_when_peer_closes_midway(self):
+        # recv yields 3 bytes, then b"" (peer closed) before 10 are collected.
+        conn, _ = self._conn([b"abc"])
+        with self.assertRaises(ConnectionClosedError):
+            conn.recv_exact(10)
 
 
 class ConfigTests(unittest.TestCase):
