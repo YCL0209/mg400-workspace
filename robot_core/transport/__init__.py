@@ -18,6 +18,7 @@ from .feedback import (
     parse_feedback,
     read_feedback_frame,
 )
+from .feedback_stream import AsyncFeedbackStream
 from .framing import extract_frames
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "FrameValidationError",
     "parse_feedback",
     "read_feedback_frame",
+    "AsyncFeedbackStream",
     "FEEDBACK_FRAME_SIZE",
     "TEST_VALUE_MAGIC",
 ]
