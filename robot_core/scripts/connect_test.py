@@ -62,6 +62,33 @@ CMD_GET_ANGLE = "GetAngle()"
 ENABLE_TIMEOUT_S = 15.0
 
 
+class DashboardCommandError(RuntimeError):
+    """A dashboard command returned a non-zero ErrorID or an unparseable reply."""
+
+
+def _check_ok(reply: str, command: str) -> str:
+    """Raise unless the dashboard reply reports success, else return it unchanged.
+
+    INTERIM guard: MG400 dashboard replies look like ``ErrorID,{value},Command();``
+    where the leading integer is 0 on success and non-zero on failure. Phase 0 has
+    no protocol layer yet, so this minimal check lives here; response parsing and
+    command assembly move into the protocol layer in a later phase. Deliberately
+    not a command framework — just "did this command actually succeed?".
+    """
+    head = reply.split(",", 1)[0].strip()
+    try:
+        error_id = int(head)
+    except ValueError as exc:
+        raise DashboardCommandError(
+            f"{command}: malformed reply, no leading ErrorID: {reply!r}"
+        ) from exc
+    if error_id != 0:
+        raise DashboardCommandError(
+            f"{command}: controller returned ErrorID {error_id}: {reply!r}"
+        )
+    return reply
+
+
 def run(config: RobotConfig | None = None) -> int:
     """Execute the Phase 0 sequence. Returns a process exit code (0 = success)."""
     config = config or RobotConfig.load()
@@ -96,13 +123,18 @@ def run(config: RobotConfig | None = None) -> int:
         feedback.connect()
 
         # 2) Enable, then read status via dashboard queries.
+        #    Gate `enabled` on the ErrorID: if EnableRobot did not actually
+        #    succeed, raise before setting `enabled` / reading further — control
+        #    falls through to the finally block for a safe close.
         logger.info("Enabling robot...")
-        print("EnableRobot ->", dashboard.request(CMD_ENABLE, timeout_s=ENABLE_TIMEOUT_S))
+        enable_reply = dashboard.request(CMD_ENABLE, timeout_s=ENABLE_TIMEOUT_S)
+        _check_ok(enable_reply, CMD_ENABLE)
         enabled = True
+        print("EnableRobot ->", enable_reply)
 
-        print("RobotMode  ->", dashboard.request(CMD_ROBOT_MODE))
-        print("GetPose    ->", dashboard.request(CMD_GET_POSE))
-        print("GetAngle   ->", dashboard.request(CMD_GET_ANGLE))
+        print("RobotMode  ->", _check_ok(dashboard.request(CMD_ROBOT_MODE), CMD_ROBOT_MODE))
+        print("GetPose    ->", _check_ok(dashboard.request(CMD_GET_POSE), CMD_GET_POSE))
+        print("GetAngle   ->", _check_ok(dashboard.request(CMD_GET_ANGLE), CMD_GET_ANGLE))
 
         # 3) Read one frame off the 30004 stream, validate magic, print parsed state.
         frame = read_feedback_frame(feedback)
@@ -124,7 +156,9 @@ def run(config: RobotConfig | None = None) -> int:
         try:
             if enabled and dashboard.is_connected:
                 logger.info("Disabling robot...")
-                print("DisableRobot ->", dashboard.request(CMD_DISABLE))
+                disable_reply = dashboard.request(CMD_DISABLE)
+                _check_ok(disable_reply, CMD_DISABLE)
+                print("DisableRobot ->", disable_reply)
         except Exception:  # noqa: BLE001
             logger.exception("DisableRobot failed during cleanup")
         finally:

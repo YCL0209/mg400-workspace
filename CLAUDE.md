@@ -40,7 +40,8 @@ controller / api   對 AI agent、Web、視覺暴露乾淨介面
 ```
 
 - 每一層只依賴它正下方那層，禁止跨層或反向依賴。
-- `transport` 對「誰在用它」一無所知，不得 import 上層或任何 UI；用 `logging`，不要 `print`。
+- `transport` 對「誰在用它」一無所知，不得 import 上層或任何 UI。
+- **logging vs print（分層）**：transport／函式庫層一律走 `logging`、**禁用 `print`**；只有 `scripts/` 底下面向操作員的 CLI 報告輸出可用 `print`（診斷訊息仍走 `logging`）。
 
 ---
 
