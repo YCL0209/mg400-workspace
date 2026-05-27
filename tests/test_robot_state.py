@@ -51,6 +51,22 @@ class EdgeTriggerTests(unittest.TestCase):
         _, changed = self.events[0]
         self.assertEqual(changed, frozenset({"tool_vector_actual"}))
 
+    def test_pose_jitter_within_deadband_does_not_notify(self):
+        # Default deadband is 0.1; a 0.01 move is noise and must not notify.
+        self.state.update(_frame(pose=(10.0, 20.0, 30.0, 0, 0, 0)))
+        self.events.clear()
+        self.state.update(_frame(pose=(10.01, 20.0, 30.0, 0, 0, 0)))
+        self.assertEqual(self.events, [])
+
+    def test_pose_move_beyond_deadband_notifies(self):
+        # A 0.5 move exceeds the 0.1 deadband and must register as a change.
+        self.state.update(_frame(pose=(10.0, 20.0, 30.0, 0, 0, 0)))
+        self.events.clear()
+        self.state.update(_frame(pose=(10.5, 20.0, 30.0, 0, 0, 0)))
+        self.assertEqual(len(self.events), 1)
+        _, changed = self.events[0]
+        self.assertEqual(changed, frozenset({"tool_vector_actual"}))
+
     def test_update_returns_changed_set(self):
         self.assertEqual(self.state.update(_frame(mode=5)), frozenset(WATCHED_FIELDS))
         self.assertEqual(self.state.update(_frame(mode=5)), frozenset())  # no change

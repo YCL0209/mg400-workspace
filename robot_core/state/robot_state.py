@@ -32,10 +32,15 @@ logger = logging.getLogger(__name__)
 #: Subscriber callback: ``(snapshot, changed_field_names)``.
 ChangeCallback = Callable[["RobotStateSnapshot", "frozenset[str]"], None]
 
-#: Fields whose change triggers a notification. Pose uses exact tuple equality,
-#: so a perfectly idle arm produces no notifications (jitter would; acceptable
-#: for passive observation — a tolerance band can be added later if needed).
+#: Fields whose change triggers a notification. Integer fields use exact
+#: comparison; ``tool_vector_actual`` (the float pose) uses a deadband so sensor
+#: jitter on an idle arm doesn't spam notifications (see DEFAULT_POSE_DEADBAND).
 WATCHED_FIELDS = ("robot_mode", "enable_status", "error_status", "tool_vector_actual")
+
+#: A pose component must move by more than this (per component, absolute) to
+#: count as a change. Units are mixed (x/y/z in mm, rx/ry/rz in deg); using one
+#: band is a deliberate simplification — split per-axis later if needed.
+DEFAULT_POSE_DEADBAND = 0.1
 
 
 @dataclass(frozen=True)
@@ -81,9 +86,15 @@ class RobotStateSnapshot:
 class RobotState:
     """Latest snapshot + edge-triggered callback subscriptions."""
 
-    def __init__(self, *, time_source: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        *,
+        pose_deadband: float = DEFAULT_POSE_DEADBAND,
+        time_source: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._snapshot: Optional[RobotStateSnapshot] = None
         self._seq = 0
+        self._pose_deadband = pose_deadband
         self._time_source = time_source
         self._subscribers: list[ChangeCallback] = []
 
@@ -128,17 +139,27 @@ class RobotState:
             self._notify(snapshot, changed)
         return changed
 
-    @staticmethod
     def _changed_fields(
-        previous: Optional[RobotStateSnapshot], current: RobotStateSnapshot
+        self, previous: Optional[RobotStateSnapshot], current: RobotStateSnapshot
     ) -> "frozenset[str]":
         if previous is None:
             return frozenset(WATCHED_FIELDS)  # first frame: everything is "new".
         return frozenset(
             name
             for name in WATCHED_FIELDS
-            if getattr(previous, name) != getattr(current, name)
+            if self._field_changed(name, getattr(previous, name), getattr(current, name))
         )
+
+    def _field_changed(self, name: str, previous_value, current_value) -> bool:
+        """Per-field change test: deadband for the float pose, exact for ints."""
+        if name == "tool_vector_actual":
+            # Changed only if some component moved beyond the deadband, so sensor
+            # jitter on an otherwise-idle arm does not register as a change.
+            return any(
+                abs(p - c) > self._pose_deadband
+                for p, c in zip(previous_value, current_value)
+            )
+        return previous_value != current_value
 
     def _notify(self, snapshot: RobotStateSnapshot, changed: "frozenset[str]") -> None:
         # Iterate a copy so a subscriber may unsubscribe from within its callback.
