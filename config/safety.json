@@ -1,0 +1,18 @@
+{
+  "provenance": "PLACEHOLDER bounds — rough/theoretical, NOT measured. Phase 2b will replace these with the empirically-determined safe envelope (annulus radii, z limits, J1 rear dead-zone, J2/J3 coupling polygon). Same discipline as kinematics: implement the gate logic now, calibrate the numbers later.",
+  "workspace": {
+    "annulus_inner_radius_mm": 150.0,
+    "annulus_outer_radius_mm": 420.0,
+    "z_min_mm": -160.0,
+    "z_max_mm": 180.0,
+    "j1_rear_dead_zone_deg": 40.0
+  },
+  "joint_ranges_deg": {
+    "J1": [-160.0, 160.0],
+    "J2": [-25.0, 85.0],
+    "J3": [-25.0, 105.0],
+    "J4": [-180.0, 180.0]
+  },
+  "j2_j3_coupling": [],
+  "coupling_note": "Empty for now: only per-axis joint ranges are enforced. Phase 2b TODO — measure the J2/J3 coupling polygon (e.g. observed J3 upper limit ~60 deg when J2~0) and encode it here as linear half-plane constraints {j2_coeff, j3_coeff, max_value, label}."
+}
