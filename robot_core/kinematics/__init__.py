@@ -11,18 +11,22 @@ from .calibration import (
     CalibrationSample,
     PoseError,
     evaluate,
+    fit_config,
     load_calibration_pairs,
 )
 from .config import KinematicsConfig, default_config
 from .forward import forward_kinematics
+from .inverse import inverse_kinematics
 
 __all__ = [
     "forward_kinematics",
+    "inverse_kinematics",
     "KinematicsConfig",
     "default_config",
     "CalibrationSample",
     "PoseError",
     "CalibrationReport",
     "evaluate",
+    "fit_config",
     "load_calibration_pairs",
 ]

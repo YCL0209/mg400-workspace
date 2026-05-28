@@ -120,6 +120,53 @@ def evaluate(
     return CalibrationReport(errors)
 
 
+def fit_config(
+    samples: "Sequence[CalibrationSample]",
+    *,
+    r_j1_coeff: float = 1.0,
+    r_j4_coeff: float = 1.0,
+    r_offset_deg: float = 0.0,
+    r_wrap: bool = False,
+) -> KinematicsConfig:
+    """Least-squares fit the link parameters (L1, L2, base_r, base_z) from pairs.
+
+    This is how ``config/kinematics.json``'s link values were produced; calling it
+    on the bundled pairs reproduces them, so the JSON is not a magic constant. The
+    fit is *linear* in the forward model::
+
+        rho = L1*sin(theta2) + L2*cos(theta3) + base_r
+        z   = L1*cos(theta2) - L2*sin(theta3) + base_z
+
+    so it is solved directly (no iteration). The r-axis convention (r = J1 + J4)
+    is not a position fit and is carried through from the arguments. numpy is
+    imported here only — the rest of the kinematics layer stays numpy-free.
+    """
+    import numpy as np
+
+    rows: list[list[float]] = []
+    rhs: list[float] = []
+    for s in samples:
+        _, j2, j3, _ = s.joints
+        x, y, z, _ = s.measured_pose
+        rho = math.hypot(x, y)
+        t2, t3 = math.radians(j2), math.radians(j3)
+        # Unknowns ordered [L1, L2, base_r, base_z].
+        rows.append([math.sin(t2), math.cos(t3), 1.0, 0.0]); rhs.append(rho)
+        rows.append([math.cos(t2), -math.sin(t3), 0.0, 1.0]); rhs.append(z)
+    solution, *_ = np.linalg.lstsq(np.array(rows), np.array(rhs), rcond=None)
+    l1, l2, base_r, base_z = (float(v) for v in solution)
+    return KinematicsConfig(
+        l1_rear_arm_mm=l1,
+        l2_forearm_mm=l2,
+        base_r_mm=base_r,
+        base_z_mm=base_z,
+        r_j1_coeff=r_j1_coeff,
+        r_j4_coeff=r_j4_coeff,
+        r_offset_deg=r_offset_deg,
+        r_wrap=r_wrap,
+    )
+
+
 def load_calibration_pairs(
     path: "str | os.PathLike[str] | None" = None,
 ) -> list[CalibrationSample]:

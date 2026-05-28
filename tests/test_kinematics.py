@@ -9,10 +9,19 @@ import unittest
 
 from robot_core.kinematics import (
     CalibrationSample,
+    default_config,
     evaluate,
+    fit_config,
     forward_kinematics,
     load_calibration_pairs,
 )
+
+try:
+    import numpy  # noqa: F401
+
+    HAVE_NUMPY = True
+except ImportError:  # pragma: no cover - depends on environment
+    HAVE_NUMPY = False
 
 # Real fit residual is ~0.003 mm / 0.001 deg; these are deliberately looser
 # thresholds that still meaningfully fail if the model/params drift.
@@ -94,6 +103,24 @@ class VerificationInterfaceTests(unittest.TestCase):
         self.assertAlmostEqual(report.errors[0].dx, 10.0, delta=1e-6)
         self.assertAlmostEqual(report.max_position_error_mm, 10.0, delta=1e-6)
         self.assertAlmostEqual(report.max_r_error_deg, 5.0, delta=1e-6)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed")
+class FitConfigTests(unittest.TestCase):
+    def test_fit_reproduces_shipped_link_parameters(self):
+        # Re-fitting from the bundled pairs must reproduce config/kinematics.json's
+        # link values — i.e. the shipped params are not a magic constant.
+        fitted = fit_config(load_calibration_pairs())
+        shipped = default_config()
+        self.assertAlmostEqual(fitted.l1_rear_arm_mm, shipped.l1_rear_arm_mm, delta=0.05)
+        self.assertAlmostEqual(fitted.l2_forearm_mm, shipped.l2_forearm_mm, delta=0.05)
+        self.assertAlmostEqual(fitted.base_r_mm, shipped.base_r_mm, delta=0.05)
+        self.assertAlmostEqual(fitted.base_z_mm, shipped.base_z_mm, delta=0.05)
+
+    def test_fitted_config_has_tiny_residual(self):
+        fitted = fit_config(load_calibration_pairs())
+        report = evaluate(load_calibration_pairs(), config=fitted)
+        self.assertLess(report.max_position_error_mm, 0.05)
 
 
 if __name__ == "__main__":

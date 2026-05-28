@@ -30,16 +30,18 @@
 ```
 controller / api   對 AI agent、Web、視覺暴露乾淨介面
       |
-   safety          所有運動指令的強制閘門（E-stop、工作範圍、奇異點禁區）
-      |
-   state           RobotState：訂閱 feedback、事件驅動，取代全域變數
-      |
-   protocol        指令拼接 + 參數驗證（集中化、型別安全）
+   safety          所有運動指令的強制閘門（E-stop、工作範圍、奇異點禁區）   ←─┐ 取用
+      |                                                                      │
+   state           RobotState：訂閱 feedback、事件驅動，取代全域變數        kinematics
+      |                                                              （純數學 joint↔Cartesian：
+   protocol        指令拼接 + 參數驗證（集中化、型別安全）                FK/IK；零 I/O，正交於主鏈）
       |
    transport       socket 收送 + 重連 + 協定分幀；不認識「機器人」概念
 ```
 
 - 每一層只依賴它正下方那層，禁止跨層或反向依賴。
+- `kinematics` **正交於主鏈**：純函式、零 I/O、不 import transport/state 或任何上下層；
+  只依賴 `config/kinematics.json`。safety 用它判斷工作範圍/奇異點，controller 用它做 pose↔joint 換算。
 - `transport` 對「誰在用它」一無所知，不得 import 上層或任何 UI。
 - **logging vs print（分層）**：transport／函式庫層一律走 `logging`、**禁用 `print`**；只有 `scripts/` 底下面向操作員的 CLI 報告輸出可用 `print`（診斷訊息仍走 `logging`）。
 
