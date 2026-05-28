@@ -33,7 +33,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -113,56 +112,49 @@ async def collect(config: RobotConfig) -> list[Pair]:
     state = RobotState()
     monitor = RobotStateMonitor(stream, state)
     pairs: list[Pair] = []
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    def on_stdin() -> None:
-        line = sys.stdin.readline()
-        if not line:  # EOF (Ctrl-D)
-            stop.set()
-            return
-        command = line.strip()
-        if command.lower() == "q":
-            stop.set()
-            return
-        snap = state.snapshot
-        if snap is None:
-            print("⚠ 尚未收到 feedback 幀，稍候再按 Enter")
-        else:
-            pair = Pair.from_snapshot(len(pairs) + 1, command, snap)
-            pairs.append(pair)
-            print("  記錄 " + pair.one_line())
-        print(_PROMPT, end="", flush=True)
 
     try:
         monitor.start()
         print(f"連線 feedback 串流 {config.ip}:{config.feedback_port}（純被動，只讀）...")
-        await _await_first_frame(state, stop)
+        await _await_first_frame(state)
         if state.snapshot is None:
             print("⚠ 逾時仍未收到 feedback 幀，請確認手臂已開機並在同網段。")
             return pairs
 
-        print(
-            "已開始接收狀態。請在硬體上手動使能＋按住示教鈕拖曳，擺好靜止後按 Enter 記一筆。\n"
-        )
-        print(_PROMPT, end="", flush=True)
-        loop.add_reader(sys.stdin.fileno(), on_stdin)
-        await stop.wait()
+        print("已開始接收狀態。請在硬體上手動使能＋按住示教鈕拖曳，擺好靜止後按 Enter 記一筆。")
+        # Read keyboard input on a worker thread so the feedback monitor keeps
+        # running on the event loop. asyncio.to_thread works on Windows
+        # (ProactorEventLoop) as well as macOS/Linux — unlike loop.add_reader,
+        # which raises NotImplementedError for stdin on Windows.
+        while True:
+            try:
+                line = await asyncio.to_thread(input, _PROMPT)
+            except EOFError:  # Ctrl-D
+                break
+            command = line.strip()
+            if command.lower() == "q":
+                break
+            # Snapshot this instant's frame: joints and pose come from one frame.
+            snap = state.snapshot
+            if snap is None:
+                print("⚠ 尚未收到 feedback 幀，稍候再按 Enter")
+                continue
+            pair = Pair.from_snapshot(len(pairs) + 1, command, snap)
+            pairs.append(pair)
+            print("  記錄 " + pair.one_line())
         return pairs
     finally:
-        try:
-            loop.remove_reader(sys.stdin.fileno())
-        except (ValueError, OSError):
-            pass
+        # Runs for q / Ctrl-D / Ctrl-C (cancellation) alike: clean stop + save.
         await monitor.stop()
         _report(pairs, monitor)
 
 
-async def _await_first_frame(state: RobotState, stop: asyncio.Event) -> None:
+async def _await_first_frame(state: RobotState) -> None:
     """Wait (briefly) for the first frame so the first capture has data."""
-    deadline = asyncio.get_running_loop().time() + FIRST_FRAME_TIMEOUT_S
-    while state.snapshot is None and not stop.is_set():
-        if asyncio.get_running_loop().time() > deadline:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + FIRST_FRAME_TIMEOUT_S
+    while state.snapshot is None:
+        if loop.time() > deadline:
             return
         await asyncio.sleep(0.05)
 
