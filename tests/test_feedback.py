@@ -30,6 +30,7 @@ def _make_frame(
     enable_status=1,
     error_status=0,
     tool_vector=(10.0, 20.0, 30.0, 40.0, 0.0, 0.0),
+    q_actual=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
 ) -> bytes:
     """Construct a valid (by default) 1440-byte feedback frame as bytes."""
     arr = np.zeros(1, dtype=fb.FEEDBACK_DTYPE)
@@ -38,6 +39,7 @@ def _make_frame(
     arr["EnableStatus"] = enable_status
     arr["ErrorStatus"] = error_status
     arr["tool_vector_actual"] = list(tool_vector)
+    arr["q_actual"] = list(q_actual)
     return arr.tobytes()
 
 
@@ -64,6 +66,14 @@ class ParseFeedbackTests(unittest.TestCase):
         frame = fb.parse_feedback(_make_frame(enable_status=0, error_status=1))
         self.assertFalse(frame.is_enabled)
         self.assertTrue(frame.has_error)
+
+    def test_parses_q_actual_joint_angles(self):
+        # Distinct values per joint so a wrong dtype offset would be caught.
+        raw = _make_frame(q_actual=(10.0, -20.0, 60.0, 45.0, 0.0, 0.0))
+        frame = fb.parse_feedback(raw)
+        self.assertEqual(frame.q_actual, (10.0, -20.0, 60.0, 45.0, 0.0, 0.0))
+        # joints exposes just J1..J4 for the 4-axis MG400.
+        self.assertEqual(frame.joints, (10.0, -20.0, 60.0, 45.0))
 
     def test_bad_magic_rejected(self):
         raw = _make_frame(test_value=0xDEADBEEF)

@@ -155,6 +155,14 @@ class FeedbackFrame:
     enable_status: int
     error_status: int
     tool_vector_actual: tuple[float, float, float, float, float, float]
+    #: Actual joint angles (deg). The frame carries 6; for the 4-axis MG400 only
+    #: indices 0..3 (J1..J4) are meaningful — see :attr:`joints`.
+    q_actual: tuple[float, float, float, float, float, float]
+
+    @property
+    def joints(self) -> tuple[float, float, float, float]:
+        """The four MG400 joint angles (J1..J4), in degrees."""
+        return self.q_actual[0], self.q_actual[1], self.q_actual[2], self.q_actual[3]
 
     @property
     def is_enabled(self) -> bool:
@@ -191,11 +199,13 @@ def parse_feedback(data: bytes) -> FeedbackFrame:
         )
 
     tool_vector = tuple(float(v) for v in frame["tool_vector_actual"][0])
+    q_actual = tuple(float(v) for v in frame["q_actual"][0])
     return FeedbackFrame(
         robot_mode=int(frame["robot_mode"][0]),
         enable_status=int(frame["EnableStatus"][0][0]),
         error_status=int(frame["ErrorStatus"][0][0]),
         tool_vector_actual=tool_vector,  # type: ignore[arg-type]  # always length 6
+        q_actual=q_actual,  # type: ignore[arg-type]  # always length 6
     )
 
 

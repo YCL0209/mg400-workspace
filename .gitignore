@@ -12,6 +12,9 @@ venv/
 # github.com/YCL0209/TCP-IP-4Axis-Python（CLAUDE.md 規定唯讀、不沿用）
 /reference/
 
+# Captured runtime data (calibration pairs, etc.) — operator artifacts, not code
+outputs/
+
 # macOS
 .DS_Store
 

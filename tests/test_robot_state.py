@@ -10,9 +10,19 @@ from robot_core.state.robot_state import WATCHED_FIELDS, RobotState
 from robot_core.transport.feedback import FeedbackFrame
 
 
-def _frame(mode=5, enable=1, error=0, pose=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)):
+def _frame(
+    mode=5,
+    enable=1,
+    error=0,
+    pose=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    q=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+):
     return FeedbackFrame(
-        robot_mode=mode, enable_status=enable, error_status=error, tool_vector_actual=pose
+        robot_mode=mode,
+        enable_status=enable,
+        error_status=error,
+        tool_vector_actual=pose,
+        q_actual=q,
     )
 
 
