@@ -1,0 +1,33 @@
+{
+  "model": "mg400_parallelogram_v1",
+  "units": "lengths in mm, angles in deg",
+  "provenance": "Link parameters back-fitted from 10 real flange-centre (joint, pose) pairs captured 2026-05-28 (config/calibration_pairs.json) via least squares. Joint-fit residual < 0.01 mm / 0.001 deg across all 10. NOT from a datasheet — re-calibrate (re-fit) if the mechanism, joint zeroing, or measurement reference (e.g. adding a TCP/jig) changes.",
+  "links": {
+    "L1_rear_arm_mm": 174.2073,
+    "L2_forearm_mm": 175.0704,
+    "base_r_mm": 109.5003,
+    "base_z_mm": -52.9998
+  },
+  "r_axis": {
+    "j1_coeff": 1.0,
+    "j4_coeff": 1.0,
+    "offset_deg": 0.0,
+    "wrap": false
+  },
+  "joint_limits_deg": {
+    "j1": [-160.0, 160.0],
+    "j2": [-25.0, 85.0],
+    "j3": [-25.0, 105.0],
+    "j4": [-180.0, 180.0]
+  },
+  "model_notes": [
+    "Parallelogram 4-axis arm: J2/J3 each set their link's ABSOLUTE angle (decoupled), the linkage keeps the flange vertical. NOT a serial 6-DOF DH chain.",
+    "theta2 = J2 measured from vertical (J2=0 -> rear arm vertical); theta3 = J3 from horizontal (J3=0 -> forearm horizontal). Data-confirmed: no angle offsets needed.",
+    "rho = base_r + L1*sin(theta2) + L2*cos(theta3)",
+    "z   = base_z + L1*cos(theta2) - L2*sin(theta3)",
+    "x = rho*cos(J1); y = rho*sin(J1).",
+    "r = j1_coeff*J1 + j4_coeff*J4 + offset_deg; wrap=false -> r may exceed +/-180 (verified: configs with J1+J4 > 180 report r > 180).",
+    "Origin on the J1 rotation axis; +X = forward; +Z = up (z<0 = flange below origin). Pose is the FLANGE CENTRE (no TCP offset).",
+    "joint_limits_deg are the theoretical single-axis ranges. Real hardware has a coupled J2/J3 travel limit (Phase 2b safety). FK does NOT enforce limits."
+  ]
+}
