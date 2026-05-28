@@ -56,8 +56,14 @@ class RobotStateSnapshot:
     enable_status: int
     error_status: int
     tool_vector_actual: tuple[float, float, float, float, float, float]
+    q_actual: tuple[float, float, float, float, float, float]
     seq: int
     monotonic_ts: float
+
+    @property
+    def joints(self) -> tuple[float, float, float, float]:
+        """The four MG400 joint angles (J1..J4), in degrees."""
+        return self.q_actual[0], self.q_actual[1], self.q_actual[2], self.q_actual[3]
 
     @property
     def is_enabled(self) -> bool:
@@ -78,6 +84,7 @@ class RobotStateSnapshot:
             enable_status=frame.enable_status,
             error_status=frame.error_status,
             tool_vector_actual=frame.tool_vector_actual,
+            q_actual=frame.q_actual,
             seq=seq,
             monotonic_ts=monotonic_ts,
         )

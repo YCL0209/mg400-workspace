@@ -17,6 +17,7 @@ def _frame(mode):
     return FeedbackFrame(
         robot_mode=mode, enable_status=1, error_status=0,
         tool_vector_actual=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        q_actual=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     )
 
 
