@@ -13,6 +13,9 @@ from robot_core.protocol.client import DashboardClient, MoveClient
 from robot_core.protocol.responses import (
     ProtocolResponseError,
     extract_responses,
+    parse_angle,
+    parse_error_id,
+    parse_pose,
     parse_response,
 )
 
@@ -28,6 +31,16 @@ class BuilderStringTests(unittest.TestCase):
         self.assertEqual(builders.get_pose(), "GetPose()")
         self.assertEqual(builders.get_angle(), "GetAngle()")
         self.assertEqual(builders.get_error_id(), "GetErrorID()")
+
+    def test_control_verb_commands(self):
+        # Continue is the SDK-PDF capitalization (reference fork's lowercase
+        # continue() is treated as fork staleness).
+        self.assertEqual(builders.continue_(), "Continue()")
+        self.assertEqual(builders.start_drag(), "StartDrag()")
+        self.assertEqual(builders.stop_drag(), "StopDrag()")
+
+    def test_sync_command(self):
+        self.assertEqual(builders.sync(), "Sync()")
 
     def test_speed_factor_integer_format(self):
         self.assertEqual(builders.speed_factor(50), "SpeedFactor(50)")
@@ -101,12 +114,68 @@ class ResponseParsingTests(unittest.TestCase):
         with self.assertRaises(ProtocolResponseError):
             parse_response("not-an-error-id,{},Foo()")
 
+    def test_parse_pose_typed(self):
+        result = parse_pose(parse_response("0,{197.23,-0.02,-30.26,2.67},GetPose()"))
+        self.assertTrue(result.is_ok)
+        self.assertAlmostEqual(result.x, 197.23)
+        self.assertAlmostEqual(result.y, -0.02)
+        self.assertAlmostEqual(result.z, -30.26)
+        self.assertAlmostEqual(result.r, 2.67)
+
+    def test_parse_pose_error_returns_no_values(self):
+        result = parse_pose(parse_response("-1,{},GetPose()"))
+        self.assertEqual(result.error_id, -1)
+        self.assertFalse(result.is_ok)
+        self.assertIsNone(result.x)
+
+    def test_parse_angle_typed(self):
+        result = parse_angle(parse_response("0,{0.0,20.0,60.0,0.0},GetAngle()"))
+        self.assertTrue(result.is_ok)
+        self.assertEqual((result.j1, result.j2, result.j3, result.j4), (0.0, 20.0, 60.0, 0.0))
+
+    def test_parse_pose_wrong_arity_raises(self):
+        with self.assertRaises(ProtocolResponseError):
+            parse_pose(parse_response("0,{1.0,2.0,3.0},GetPose()"))
+
     def test_extract_responses_splits_stream(self):
         buffer = b"0,{5},RobotMode();-1,{},EnableRobot();0,{},Get"
         responses, remainder = extract_responses(buffer)
         self.assertEqual([r.error_id for r in responses], [0, -1])
         self.assertEqual([r.is_ok for r in responses], [True, False])
         self.assertEqual(remainder, b"0,{},Get")  # partial reply carried over
+
+
+class GetErrorIDParsingTests(unittest.TestCase):
+    def test_parses_nested_controller_and_servo_groups(self):
+        # Realistic firmware reply: [controller, servo1..6]; only ctrl + s1-4 kept.
+        result = parse_error_id(
+            parse_response("0,{[[112,114],[0],[0],[0],[0],[0],[0]]},GetErrorID()")
+        )
+        self.assertTrue(result.is_ok)
+        self.assertEqual(result.controller_errors, (112, 114))
+        self.assertEqual(result.servo_errors, ((0,), (0,), (0,), (0,)))
+        self.assertTrue(result.has_active_errors)
+
+    def test_no_active_errors(self):
+        result = parse_error_id(parse_response("0,{[[],[],[],[],[]]},GetErrorID()"))
+        self.assertTrue(result.is_ok)
+        self.assertEqual(result.controller_errors, ())
+        self.assertFalse(result.has_active_errors)
+
+    def test_error_reply_yields_empty_result(self):
+        result = parse_error_id(parse_response("-1,{},GetErrorID()"))
+        self.assertEqual(result.error_id, -1)
+        self.assertFalse(result.is_ok)
+        self.assertEqual(result.controller_errors, ())
+        self.assertEqual(result.servo_errors, ())
+
+    def test_malformed_payload_raises(self):
+        with self.assertRaises(ProtocolResponseError):
+            parse_error_id(parse_response("0,{not-a-list},GetErrorID()"))
+
+    def test_flat_list_not_nested_raises(self):
+        with self.assertRaises(ProtocolResponseError):
+            parse_error_id(parse_response("0,{[1,2,3]},GetErrorID()"))
 
 
 class _FakeConnection:
@@ -132,14 +201,57 @@ class ClientWiringTests(unittest.TestCase):
 
     def test_dashboard_get_pose_wiring(self):
         conn = _FakeConnection("0,{1.0,2.0,3.0,4.0},GetPose()")
-        resp = DashboardClient(conn).get_pose()
+        result = DashboardClient(conn).get_pose()
         self.assertEqual(conn.sent, ["GetPose()"])
-        self.assertEqual(resp.payload, "1.0,2.0,3.0,4.0")
+        self.assertTrue(result.is_ok)
+        self.assertEqual((result.x, result.y, result.z, result.r), (1.0, 2.0, 3.0, 4.0))
+
+    def test_dashboard_get_angle_wiring(self):
+        conn = _FakeConnection("0,{0.0,20.0,60.0,0.0},GetAngle()")
+        result = DashboardClient(conn).get_angle()
+        self.assertEqual(conn.sent, ["GetAngle()"])
+        self.assertEqual((result.j1, result.j2, result.j3, result.j4), (0.0, 20.0, 60.0, 0.0))
+
+    def test_dashboard_get_error_id_wiring(self):
+        conn = _FakeConnection("0,{[[112],[0],[0],[0],[0]]},GetErrorID()")
+        result = DashboardClient(conn).get_error_id()
+        self.assertEqual(conn.sent, ["GetErrorID()"])
+        self.assertEqual(result.controller_errors, (112,))
+        self.assertTrue(result.has_active_errors)
+
+    def test_dashboard_control_verbs_wiring(self):
+        for method, command in [
+            ("continue_", "Continue()"),
+            ("start_drag", "StartDrag()"),
+            ("stop_drag", "StopDrag()"),
+        ]:
+            conn = _FakeConnection(f"0,{{}},{command}")
+            resp = getattr(DashboardClient(conn), method)()
+            self.assertEqual(conn.sent, [command])
+            self.assertTrue(resp.is_ok)
+
+    def test_dashboard_control_verb_error_path(self):
+        # A reject reply (-1) surfaces as error_id, never an exception.
+        conn = _FakeConnection("-1,{},StartDrag()")
+        resp = DashboardClient(conn).start_drag()
+        self.assertEqual(resp.error_id, -1)
+        self.assertFalse(resp.is_ok)
 
     def test_emergency_stop_only_on_dashboard_client(self):
         # Channel separation: E-stop is a dashboard command, not on MoveClient.
         self.assertTrue(hasattr(DashboardClient, "emergency_stop"))
         self.assertFalse(hasattr(MoveClient, "emergency_stop"))
+
+    def test_move_client_sync_wiring(self):
+        conn = _FakeConnection("0,{},Sync()")
+        resp = MoveClient(conn).sync()
+        self.assertEqual(conn.sent, ["Sync()"])
+        self.assertTrue(resp.is_ok)
+
+    def test_sync_only_on_move_client(self):
+        # Channel separation: Sync drains the move queue (30003), not a dashboard cmd.
+        self.assertTrue(hasattr(MoveClient, "sync"))
+        self.assertFalse(hasattr(DashboardClient, "sync"))
 
 
 if __name__ == "__main__":

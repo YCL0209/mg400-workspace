@@ -21,7 +21,16 @@ from typing import Optional
 from robot_core.transport.connection import FramedConnection
 
 from . import builders
-from .responses import DashboardResponse, parse_response
+from .responses import (
+    AngleResult,
+    DashboardResponse,
+    GetErrorIDResult,
+    PoseResult,
+    parse_angle,
+    parse_error_id,
+    parse_pose,
+    parse_response,
+)
 
 
 class _CommandChannel:
@@ -64,17 +73,32 @@ class DashboardClient(_CommandChannel):
     def speed_factor(self, percent: int) -> DashboardResponse:
         return self._send(builders.speed_factor(percent))
 
+    def continue_(self) -> DashboardResponse:
+        """Resume the move queue (also the queue-recovery step after ClearError)."""
+        return self._send(builders.continue_())
+
+    def start_drag(self) -> DashboardResponse:
+        """Enter software drag/teach mode (replaces the physical unlock button)."""
+        return self._send(builders.start_drag())
+
+    def stop_drag(self) -> DashboardResponse:
+        """Leave software drag/teach mode."""
+        return self._send(builders.stop_drag())
+
     def robot_mode(self) -> DashboardResponse:
         return self._send(builders.robot_mode())
 
-    def get_pose(self) -> DashboardResponse:
-        return self._send(builders.get_pose())
+    def get_pose(self) -> PoseResult:
+        """Query the current Cartesian pose as a typed :class:`PoseResult`."""
+        return parse_pose(self._send(builders.get_pose()))
 
-    def get_angle(self) -> DashboardResponse:
-        return self._send(builders.get_angle())
+    def get_angle(self) -> AngleResult:
+        """Query the current joint angles as a typed :class:`AngleResult`."""
+        return parse_angle(self._send(builders.get_angle()))
 
-    def get_error_id(self) -> DashboardResponse:
-        return self._send(builders.get_error_id())
+    def get_error_id(self) -> GetErrorIDResult:
+        """Query active error IDs as a typed :class:`GetErrorIDResult`."""
+        return parse_error_id(self._send(builders.get_error_id()))
 
 
 class MoveClient(_CommandChannel):
@@ -88,3 +112,8 @@ class MoveClient(_CommandChannel):
 
     def joint_mov_j(self, j1: float, j2: float, j3: float, j4: float) -> DashboardResponse:
         return self._send(builders.joint_mov_j(j1, j2, j3, j4))
+
+    def sync(self, *, timeout_s: Optional[float] = None) -> DashboardResponse:
+        """Block until the move queue drains. The reply returns only after all
+        prior queued motions finish, so callers may pass a longer ``timeout_s``."""
+        return self._send(builders.sync(), timeout_s=timeout_s)

@@ -132,6 +132,28 @@ def speed_factor(percent: int) -> str:
     return f"SpeedFactor({value:d})"
 
 
+def continue_() -> str:
+    """Resume a paused move queue.
+
+    Pairs with ``Pause()`` and is the required follow-up to ``ClearError()`` when
+    recovering the queue after an alarm. String per the SDK PDF (controller
+    1.7.0.0): ``Continue()``. The reference Python fork sends lowercase
+    ``continue()`` — treated as fork staleness; confirm on hardware in Phase 5.
+    """
+    return "Continue()"
+
+
+def start_drag() -> str:
+    """Enter software drag/teach mode (gravity compensation), the programmatic
+    replacement for the physical unlock button. Only valid while enabled."""
+    return "StartDrag()"
+
+
+def stop_drag() -> str:
+    """Leave software drag/teach mode."""
+    return "StopDrag()"
+
+
 # -- Move commands (port 30003) --------------------------------------------
 
 def mov_l(x: float, y: float, z: float, r: float) -> str:
@@ -152,6 +174,16 @@ def joint_mov_j(j1: float, j2: float, j3: float, j4: float) -> str:
     c = _require_joint("J3", j3)
     d = _require_joint("J4", j4)
     return f"JointMovJ({a:f},{b:f},{c:f},{d:f})"
+
+
+def sync() -> str:
+    """Block until the move queue is fully executed.
+
+    MOVE-CHANNEL command (port 30003): it is enqueued and its reply returns only
+    after all prior queued motions finish. Phase 5 sends this before trusting a
+    position, instead of sleeping. Reference: ``DobotApiMove.Sync``.
+    """
+    return "Sync()"
 
 
 def _format_cartesian(name: str, x: object, y: object, z: object, r: object) -> str:
