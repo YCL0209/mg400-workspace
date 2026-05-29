@@ -24,8 +24,10 @@ from . import builders
 from .responses import (
     AngleResult,
     DashboardResponse,
+    GetErrorIDResult,
     PoseResult,
     parse_angle,
+    parse_error_id,
     parse_pose,
     parse_response,
 )
@@ -94,8 +96,9 @@ class DashboardClient(_CommandChannel):
         """Query the current joint angles as a typed :class:`AngleResult`."""
         return parse_angle(self._send(builders.get_angle()))
 
-    def get_error_id(self) -> DashboardResponse:
-        return self._send(builders.get_error_id())
+    def get_error_id(self) -> GetErrorIDResult:
+        """Query active error IDs as a typed :class:`GetErrorIDResult`."""
+        return parse_error_id(self._send(builders.get_error_id()))
 
 
 class MoveClient(_CommandChannel):

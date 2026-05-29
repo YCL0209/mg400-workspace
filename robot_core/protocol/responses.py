@@ -9,6 +9,7 @@ reply; we don't), then parses each complete message into a :class:`DashboardResp
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from robot_core.transport.framing import extract_frames
@@ -66,6 +67,30 @@ class AngleResult:
         return self.error_id == 0
 
 
+@dataclass(frozen=True)
+class GetErrorIDResult:
+    """Parsed GetErrorID reply.
+
+    The controller returns a nested list ``[[controller errors], [servo1], ...]``;
+    for the 4-axis MG400 only the controller group and servos 1-4 are kept (any
+    servo5/6 groups are dropped). Empty groups mean no active error there.
+    """
+
+    error_id: int
+    controller_errors: "tuple[int, ...]" = ()
+    servo_errors: "tuple[tuple[int, ...], ...]" = ()
+
+    @property
+    def is_ok(self) -> bool:
+        """True when the GetErrorID *command* succeeded — not whether the robot
+        is error-free (see :attr:`has_active_errors` for that)."""
+        return self.error_id == 0
+
+    @property
+    def has_active_errors(self) -> bool:
+        return bool(self.controller_errors) or any(self.servo_errors)
+
+
 def parse_response(message: str) -> DashboardResponse:
     """Parse one already-framed reply (no trailing ``;``) into a DashboardResponse.
 
@@ -115,6 +140,38 @@ def parse_angle(response: DashboardResponse) -> AngleResult:
         return AngleResult(response.error_id)
     j1, j2, j3, j4 = _four_floats(response.payload)
     return AngleResult(response.error_id, j1, j2, j3, j4)
+
+
+def parse_error_id(response: DashboardResponse) -> GetErrorIDResult:
+    """Type a GetErrorID reply into a :class:`GetErrorIDResult`.
+
+    The payload is a nested list ``[[controller], [servo1], ...]`` — it needs
+    dedicated handling, not the generic single-value / comma logic. Only the
+    controller group and servos 1-4 are kept. An error reply (non-zero ErrorID)
+    yields an empty result; a malformed payload raises ProtocolResponseError.
+    """
+    if not response.is_ok:
+        return GetErrorIDResult(response.error_id)
+    payload = response.payload or "[]"
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ProtocolResponseError(
+            f"GetErrorID payload is not valid JSON: {payload!r}"
+        ) from exc
+    if not isinstance(data, list) or not all(isinstance(group, list) for group in data):
+        raise ProtocolResponseError(
+            f"GetErrorID payload is not a list of lists: {payload!r}"
+        )
+    try:
+        groups = [tuple(int(code) for code in group) for group in data]
+    except (TypeError, ValueError) as exc:
+        raise ProtocolResponseError(
+            f"GetErrorID payload has a non-integer error code: {payload!r}"
+        ) from exc
+    controller = groups[0] if groups else ()
+    servos = tuple(groups[1:5])  # servos 1-4; ignore servo5/6 if the firmware sends them
+    return GetErrorIDResult(response.error_id, controller, servos)
 
 
 def extract_responses(buffer: bytes) -> "tuple[list[DashboardResponse], bytes]":

@@ -14,6 +14,7 @@ from robot_core.protocol.responses import (
     ProtocolResponseError,
     extract_responses,
     parse_angle,
+    parse_error_id,
     parse_pose,
     parse_response,
 )
@@ -144,6 +145,39 @@ class ResponseParsingTests(unittest.TestCase):
         self.assertEqual(remainder, b"0,{},Get")  # partial reply carried over
 
 
+class GetErrorIDParsingTests(unittest.TestCase):
+    def test_parses_nested_controller_and_servo_groups(self):
+        # Realistic firmware reply: [controller, servo1..6]; only ctrl + s1-4 kept.
+        result = parse_error_id(
+            parse_response("0,{[[112,114],[0],[0],[0],[0],[0],[0]]},GetErrorID()")
+        )
+        self.assertTrue(result.is_ok)
+        self.assertEqual(result.controller_errors, (112, 114))
+        self.assertEqual(result.servo_errors, ((0,), (0,), (0,), (0,)))
+        self.assertTrue(result.has_active_errors)
+
+    def test_no_active_errors(self):
+        result = parse_error_id(parse_response("0,{[[],[],[],[],[]]},GetErrorID()"))
+        self.assertTrue(result.is_ok)
+        self.assertEqual(result.controller_errors, ())
+        self.assertFalse(result.has_active_errors)
+
+    def test_error_reply_yields_empty_result(self):
+        result = parse_error_id(parse_response("-1,{},GetErrorID()"))
+        self.assertEqual(result.error_id, -1)
+        self.assertFalse(result.is_ok)
+        self.assertEqual(result.controller_errors, ())
+        self.assertEqual(result.servo_errors, ())
+
+    def test_malformed_payload_raises(self):
+        with self.assertRaises(ProtocolResponseError):
+            parse_error_id(parse_response("0,{not-a-list},GetErrorID()"))
+
+    def test_flat_list_not_nested_raises(self):
+        with self.assertRaises(ProtocolResponseError):
+            parse_error_id(parse_response("0,{[1,2,3]},GetErrorID()"))
+
+
 class _FakeConnection:
     """Records the last command sent and returns a scripted reply (no socket)."""
 
@@ -177,6 +211,13 @@ class ClientWiringTests(unittest.TestCase):
         result = DashboardClient(conn).get_angle()
         self.assertEqual(conn.sent, ["GetAngle()"])
         self.assertEqual((result.j1, result.j2, result.j3, result.j4), (0.0, 20.0, 60.0, 0.0))
+
+    def test_dashboard_get_error_id_wiring(self):
+        conn = _FakeConnection("0,{[[112],[0],[0],[0],[0]]},GetErrorID()")
+        result = DashboardClient(conn).get_error_id()
+        self.assertEqual(conn.sent, ["GetErrorID()"])
+        self.assertEqual(result.controller_errors, (112,))
+        self.assertTrue(result.has_active_errors)
 
     def test_dashboard_control_verbs_wiring(self):
         for method, command in [
