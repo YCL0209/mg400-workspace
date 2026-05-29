@@ -140,7 +140,7 @@ class TestStatusFormatting(unittest.TestCase):
         self.assertLess(dist, 50)  # Close to boundary
 
 
-class TestCommandRouting(unittest.TestCase):
+class TestCommandRouting(unittest.IsolatedAsyncioTestCase):
     """Test REPL command dispatch to correct methods."""
 
     def setUp(self):
@@ -152,59 +152,55 @@ class TestCommandRouting(unittest.TestCase):
 
     async def test_enable_calls_dashboard(self):
         """Enable command routes to DashboardClient.enable_robot()."""
-        response = DashboardResponse(
-            raw_reply="0,,EnableRobot();",
-            error_id=0,
-            value=None,
-            command="EnableRobot"
-        )
+        response = DashboardResponse(error_id=0, payload="", raw="0,,EnableRobot();")
         self.dashboard.enable_robot.return_value = response
-        
-        await self.workbench.cmd_enable()
-        
+
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_enable()
+
         self.dashboard.enable_robot.assert_called_once()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("Dashboard error", output)  # no swallowed AttributeError
+        self.assertIn("enabled successfully", output)  # success path ran
 
     async def test_disable_calls_dashboard(self):
         """Disable command routes to DashboardClient.disable_robot()."""
-        response = DashboardResponse(
-            raw_reply="0,,DisableRobot();",
-            error_id=0,
-            value=None,
-            command="DisableRobot"
-        )
+        response = DashboardResponse(error_id=0, payload="", raw="0,,DisableRobot();")
         self.dashboard.disable_robot.return_value = response
-        
-        await self.workbench.cmd_disable()
-        
+
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_disable()
+
         self.dashboard.disable_robot.assert_called_once()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("Dashboard error", output)
+        self.assertIn("disabled successfully", output)
 
     async def test_clear_calls_dashboard(self):
         """Clear command routes to DashboardClient.clear_error()."""
-        response = DashboardResponse(
-            raw_reply="0,,ClearError();",
-            error_id=0,
-            value=None,
-            command="ClearError"
-        )
+        response = DashboardResponse(error_id=0, payload="", raw="0,,ClearError();")
         self.dashboard.clear_error.return_value = response
-        
-        await self.workbench.cmd_clear()
-        
+
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_clear()
+
         self.dashboard.clear_error.assert_called_once()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("Dashboard error", output)
+        self.assertIn("cleared successfully", output)
 
     async def test_mode_calls_dashboard(self):
         """Mode command routes to DashboardClient.robot_mode()."""
-        response = DashboardResponse(
-            raw_reply="0,5,RobotMode();",
-            error_id=0,
-            value="5",
-            command="RobotMode"
-        )
+        response = DashboardResponse(error_id=0, payload="5", raw="0,5,RobotMode();")
         self.dashboard.robot_mode.return_value = response
-        
-        await self.workbench.cmd_mode()
-        
+
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_mode()
+
         self.dashboard.robot_mode.assert_called_once()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("Dashboard error", output)
+        self.assertIn("Robot mode:", output)
 
     async def test_dashboard_not_connected(self):
         """Commands handle missing dashboard gracefully."""
@@ -216,7 +212,7 @@ class TestCommandRouting(unittest.TestCase):
         await workbench.cmd_clear()
 
 
-class TestMarkAndSave(unittest.TestCase):
+class TestMarkAndSave(unittest.IsolatedAsyncioTestCase):
     """Test limit point marking and saving."""
 
     def setUp(self):
@@ -295,7 +291,7 @@ class TestMarkAndSave(unittest.TestCase):
         self.assertEqual(len(self.workbench.marked_points), 0)
 
 
-class TestSingularityQuery(unittest.TestCase):
+class TestSingularityQuery(unittest.IsolatedAsyncioTestCase):
     """Test singularity analysis command."""
 
     def setUp(self):
@@ -332,7 +328,7 @@ class TestSingularityQuery(unittest.TestCase):
             self.assertIn("Joint proximity to limits:", output)
 
 
-class TestREPLIntegration(unittest.TestCase):
+class TestREPLIntegration(unittest.IsolatedAsyncioTestCase):
     """Test REPL loop integration."""
 
     @patch('robot_core.scripts.workbench.asyncio.to_thread')

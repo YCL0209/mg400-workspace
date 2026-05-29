@@ -212,7 +212,7 @@ class Workbench:
         print("Sending: EnableRobot()")
         try:
             response = self.dashboard.enable_robot()
-            print(f"Received: {response.raw_reply}")
+            print(f"Received: {response.raw}")
             if response.error_id == 0:
                 print("Robot enabled successfully")
             else:
@@ -229,7 +229,7 @@ class Workbench:
         print("Sending: DisableRobot()")
         try:
             response = self.dashboard.disable_robot()
-            print(f"Received: {response.raw_reply}")
+            print(f"Received: {response.raw}")
             if response.error_id == 0:
                 print("Robot disabled successfully")
             else:
@@ -246,7 +246,7 @@ class Workbench:
         print("Sending: ClearError()")
         try:
             response = self.dashboard.clear_error()
-            print(f"Received: {response.raw_reply}")
+            print(f"Received: {response.raw}")
             if response.error_id == 0:
                 print("Errors cleared successfully")
             else:
@@ -263,9 +263,9 @@ class Workbench:
         print("Sending: RobotMode()")
         try:
             response = self.dashboard.robot_mode()
-            print(f"Received: {response.raw_reply}")
+            print(f"Received: {response.raw}")
             if response.error_id == 0:
-                print(f"Robot mode: {response.value}")
+                print(f"Robot mode: {response.payload}")
             else:
                 print(f"Query failed: error {response.error_id}")
         except Exception as e:
