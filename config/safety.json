@@ -1,18 +1,68 @@
 {
-  "provenance": "PLACEHOLDER bounds — rough/theoretical, NOT measured. Phase 2b will replace these with the empirically-determined safe envelope (annulus radii, z limits, J1 rear dead-zone, J2/J3 coupling polygon). Same discipline as kinematics: implement the gate logic now, calibrate the numbers later.",
+  "_meta": {
+    "version": "phase-2b-v1",
+    "date": "2026-05-29",
+    "source_data": [
+      "outputs/limits_20260529_132808.json (7 outer reach points)",
+      "outputs/limits_20260529_134228.json (5 J2/J3 coupling points)",
+      "outputs/limits_20260529_135459.json (1 z_floor point)"
+    ],
+    "provenance": "Empirically calibrated from 13 real-arm limit points collected via workbench on 2026-05-29. Workspace annulus, z limits, and J1 ranges derived from measured extremes. J2/J3 upper bounds from measured. J2/J3/J4 lower bounds use spec values since not empirically probed. Coupling polygon NOT fitted in v1 — data shows non-linear envelope that calibrate_bounds v1's linear regression can't capture; pending Phase 2b v2."
+  },
+
   "workspace": {
-    "annulus_inner_radius_mm": 150.0,
-    "annulus_outer_radius_mm": 420.0,
-    "z_min_mm": -160.0,
-    "z_max_mm": 180.0,
-    "j1_rear_dead_zone_deg": 40.0
+    "annulus_inner_radius_mm": 123.83,
+    "annulus_outer_radius_mm": 440.0,
+    "z_min_mm": -197.05,
+    "z_max_mm": 116.21,
+    "j1_rear_dead_zone_deg": 40.0,
+    "_provenance": {
+      "annulus_inner": "calibrate_bounds output, 20mm margin from observed min planar radius",
+      "annulus_outer": "calibrate_bounds output, clamped at spec reach 440mm. Real arm reached ρ≈436mm at outer_left45.",
+      "z_min": "observed at floor_0 (J2=82.8, J3=77.3, J4=81.2), bare flange touching tabletop. Future tools: z_min_effective = z_min + tool.z_offset_mm.",
+      "z_max": "observed only — not explicitly probed. Real arm can likely go higher (spec workspace ~280mm above origin).",
+      "j1_rear_dead_zone": "spec value retained. Real arm reached J1=±157~159° in outer_left135/right135 → confirms ~40° rear gap (360° − 2×160° = 40°)."
+    }
   },
+
   "joint_ranges_deg": {
-    "J1": [-160.0, 160.0],
-    "J2": [-25.0, 85.0],
-    "J3": [-25.0, 105.0],
-    "J4": [-180.0, 180.0]
+    "J1": [-159.9, 157.0],
+    "J2": [-25.0, 82.8],
+    "J3": [-25.0, 77.3],
+    "J4": [-180.0, 180.0],
+    "_provenance": {
+      "J1": "both ends intentionally pushed to limit during outer_left135/right135采集",
+      "J2": "upper bound from floor_0 (J2=82.8, pushed to limit). Lower bound: spec value -25° retained (real arm not pushed to J2 lower limit during采集; observed min was -14.7° during coupling test).",
+      "J3": "upper bound from floor_0 (J3=77.3, pushed to limit). Lower bound: spec value -25° retained (real arm not pushed to J3 lower limit).",
+      "J4": "spec range retained — J4 was not exercised during Phase 2b采集 (observed range was a random subset)."
+    }
   },
+
   "j2_j3_coupling": [],
-  "coupling_note": "Empty for now: only per-axis joint ranges are enforced. Phase 2b TODO — measure the J2/J3 coupling polygon (e.g. observed J3 upper limit ~60 deg when J2~0) and encode it here as linear half-plane constraints {j2_coeff, j3_coeff, max_value, label}."
+
+  "_coupling_note": {
+    "status": "NOT_FITTED_IN_V1",
+    "reason": "Real arm data shows non-linear coupling envelope that calibrate_bounds v1 (linear regression with J3>50 filter) cannot capture.",
+    "observed_data": {
+      "(J2=-14.7, J3max=44.5)": "boundary",
+      "(J2=-7.4, J3max=50.4)":  "boundary, rising linearly with J2",
+      "(J2=+14.1, J3max=55.3)": "boundary, approaching saturation",
+      "(J2=+29.3, J3max=55.5)": "boundary, saturated near ~55°",
+      "(J2=+63.9, J3max=35.7)": "Z_FLOOR_MASQUERADING — limit is table collision, not coupling"
+    },
+    "v1_protection_gap": "Without coupling polygon, safety only enforces per-axis J3 ≤ 77.3°. Some (J2, J3) combinations will pass safety but alarm at controller (e.g., J2=0, J3=70 — passes per-axis check but real arm alarms because at J2=0 the coupling limit is J3 ≈ 55).",
+    "fallback_behavior": "When Phase 5 sends MovL violating real coupling, controller alarms → mid-motion error. Safety layer not catching, but no hardware damage (controller's own safety catches). Plan: Phase 2b v2 upgrade calibrate_bounds + collect more points.",
+    "v2_plan": [
+      "Upgrade calibrate_bounds to handle non-linear / piecewise envelope",
+      "Detect z_floor masqueraders (high J2 + low J3 patterns)",
+      "Collect 5~8 additional coupling points at mid-z height (avoiding table interference)",
+      "Output piecewise linear or polygon constraint set"
+    ]
+  },
+
+  "_future_tool_offset": {
+    "note": "Phase 6 controller will add tool transforms. z_min is currently for bare flange.",
+    "formula": "z_min_effective_for_tool = z_min_mm + tool.z_offset_mm",
+    "example": "Gripper extending 50mm below flange: z_min_effective = -197.05 + 50 = -147.05mm"
+  }
 }

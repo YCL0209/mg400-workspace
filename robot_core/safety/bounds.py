@@ -51,8 +51,9 @@ class SafetyBounds:
     def from_dict(cls, raw: dict) -> "SafetyBounds":
         ws = raw["workspace"]
         ranges = {
-            axis: (float(lo), float(hi))
-            for axis, (lo, hi) in raw["joint_ranges_deg"].items()
+            axis: (float(v[0]), float(v[1]))
+            for axis, v in raw["joint_ranges_deg"].items()
+            if not axis.startswith("_")
         }
         coupling = tuple(
             CouplingConstraint(
