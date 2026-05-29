@@ -100,3 +100,8 @@ class MoveClient(_CommandChannel):
 
     def joint_mov_j(self, j1: float, j2: float, j3: float, j4: float) -> DashboardResponse:
         return self._send(builders.joint_mov_j(j1, j2, j3, j4))
+
+    def sync(self, *, timeout_s: Optional[float] = None) -> DashboardResponse:
+        """Block until the move queue drains. The reply returns only after all
+        prior queued motions finish, so callers may pass a longer ``timeout_s``."""
+        return self._send(builders.sync(), timeout_s=timeout_s)

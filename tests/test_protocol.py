@@ -36,6 +36,9 @@ class BuilderStringTests(unittest.TestCase):
         self.assertEqual(builders.start_drag(), "StartDrag()")
         self.assertEqual(builders.stop_drag(), "StopDrag()")
 
+    def test_sync_command(self):
+        self.assertEqual(builders.sync(), "Sync()")
+
     def test_speed_factor_integer_format(self):
         self.assertEqual(builders.speed_factor(50), "SpeedFactor(50)")
         self.assertEqual(builders.speed_factor(1), "SpeedFactor(1)")
@@ -165,6 +168,17 @@ class ClientWiringTests(unittest.TestCase):
         # Channel separation: E-stop is a dashboard command, not on MoveClient.
         self.assertTrue(hasattr(DashboardClient, "emergency_stop"))
         self.assertFalse(hasattr(MoveClient, "emergency_stop"))
+
+    def test_move_client_sync_wiring(self):
+        conn = _FakeConnection("0,{},Sync()")
+        resp = MoveClient(conn).sync()
+        self.assertEqual(conn.sent, ["Sync()"])
+        self.assertTrue(resp.is_ok)
+
+    def test_sync_only_on_move_client(self):
+        # Channel separation: Sync drains the move queue (30003), not a dashboard cmd.
+        self.assertTrue(hasattr(MoveClient, "sync"))
+        self.assertFalse(hasattr(DashboardClient, "sync"))
 
 
 if __name__ == "__main__":

@@ -176,6 +176,16 @@ def joint_mov_j(j1: float, j2: float, j3: float, j4: float) -> str:
     return f"JointMovJ({a:f},{b:f},{c:f},{d:f})"
 
 
+def sync() -> str:
+    """Block until the move queue is fully executed.
+
+    MOVE-CHANNEL command (port 30003): it is enqueued and its reply returns only
+    after all prior queued motions finish. Phase 5 sends this before trusting a
+    position, instead of sleeping. Reference: ``DobotApiMove.Sync``.
+    """
+    return "Sync()"
+
+
 def _format_cartesian(name: str, x: object, y: object, z: object, r: object) -> str:
     vx = _require_number(f"{name}.x", x)
     vy = _require_number(f"{name}.y", y)
