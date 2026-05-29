@@ -126,12 +126,15 @@ class FramedConnectionTests(unittest.TestCase):
         conn, _ = self._framed([b"0,{1,2,", b"3,4},GetPo", b"se();"])
         self.assertEqual(conn.request("GetPose()"), "0,{1,2,3,4},GetPose()")
 
-    def test_over_read_reply_is_buffered_for_next_request(self):
-        # One recv delivers two replies; the second must be served from buffer.
-        conn, sock = self._framed([b"0,{a},GetPose();0,{b},GetAngle();"])
-        self.assertEqual(conn.request("GetPose()"), "0,{a},GetPose()")
-        # Second request should not need any further recv (chunks exhausted).
-        self.assertEqual(conn.request("GetAngle()"), "0,{b},GetAngle()")
+    def test_over_read_residue_discarded_before_next_request(self):
+        # Reject-state firmware sends a double-';' frame; the framer yields two
+        # frames and the 2nd ('EnableRobot()') is an echo, not a pipelined reply.
+        # request() must drop that residue and read the next request's real reply.
+        conn, sock = self._framed(
+            [b"-1,{},;EnableRobot();", b"0,{5},RobotMode();"]
+        )
+        self.assertEqual(conn.request("EnableRobot()"), "-1,{},")
+        self.assertEqual(conn.request("RobotMode()"), "0,{5},RobotMode()")
 
     def test_peer_close_midframe_raises(self):
         conn, _ = self._framed([b"0,{partial"])  # then recv() -> b""

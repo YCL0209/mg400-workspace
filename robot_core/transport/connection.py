@@ -214,6 +214,12 @@ class FramedConnection(TcpConnection):
         Returns the reply with terminator and surrounding whitespace stripped.
         """
         sock = self._require_socket()
+        # Drop over-read residue from the previous request: this firmware answers
+        # rejected commands with a non-standard double-';' frame
+        # (e.g. b"-1,{},;EnableRobot();") whose 2nd fragment is an echo, not the
+        # next reply. Left in _pending it would desync every later request.
+        self._pending.clear()
+        self._rx_buffer = b""
         self.send(message.encode("utf-8") + self._terminator)
         return self._read_frame(sock, timeout_s)
 

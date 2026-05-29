@@ -14,6 +14,8 @@ venv/
 
 # Captured runtime data (calibration pairs, etc.) — operator artifacts, not code
 outputs/
+# ...except raw limit-probe captures, which are calibration truth, not intermediates
+!outputs/limits_*.json
 
 # macOS
 .DS_Store
