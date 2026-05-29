@@ -13,6 +13,8 @@ from robot_core.protocol.client import DashboardClient, MoveClient
 from robot_core.protocol.responses import (
     ProtocolResponseError,
     extract_responses,
+    parse_angle,
+    parse_pose,
     parse_response,
 )
 
@@ -111,6 +113,29 @@ class ResponseParsingTests(unittest.TestCase):
         with self.assertRaises(ProtocolResponseError):
             parse_response("not-an-error-id,{},Foo()")
 
+    def test_parse_pose_typed(self):
+        result = parse_pose(parse_response("0,{197.23,-0.02,-30.26,2.67},GetPose()"))
+        self.assertTrue(result.is_ok)
+        self.assertAlmostEqual(result.x, 197.23)
+        self.assertAlmostEqual(result.y, -0.02)
+        self.assertAlmostEqual(result.z, -30.26)
+        self.assertAlmostEqual(result.r, 2.67)
+
+    def test_parse_pose_error_returns_no_values(self):
+        result = parse_pose(parse_response("-1,{},GetPose()"))
+        self.assertEqual(result.error_id, -1)
+        self.assertFalse(result.is_ok)
+        self.assertIsNone(result.x)
+
+    def test_parse_angle_typed(self):
+        result = parse_angle(parse_response("0,{0.0,20.0,60.0,0.0},GetAngle()"))
+        self.assertTrue(result.is_ok)
+        self.assertEqual((result.j1, result.j2, result.j3, result.j4), (0.0, 20.0, 60.0, 0.0))
+
+    def test_parse_pose_wrong_arity_raises(self):
+        with self.assertRaises(ProtocolResponseError):
+            parse_pose(parse_response("0,{1.0,2.0,3.0},GetPose()"))
+
     def test_extract_responses_splits_stream(self):
         buffer = b"0,{5},RobotMode();-1,{},EnableRobot();0,{},Get"
         responses, remainder = extract_responses(buffer)
@@ -142,9 +167,16 @@ class ClientWiringTests(unittest.TestCase):
 
     def test_dashboard_get_pose_wiring(self):
         conn = _FakeConnection("0,{1.0,2.0,3.0,4.0},GetPose()")
-        resp = DashboardClient(conn).get_pose()
+        result = DashboardClient(conn).get_pose()
         self.assertEqual(conn.sent, ["GetPose()"])
-        self.assertEqual(resp.payload, "1.0,2.0,3.0,4.0")
+        self.assertTrue(result.is_ok)
+        self.assertEqual((result.x, result.y, result.z, result.r), (1.0, 2.0, 3.0, 4.0))
+
+    def test_dashboard_get_angle_wiring(self):
+        conn = _FakeConnection("0,{0.0,20.0,60.0,0.0},GetAngle()")
+        result = DashboardClient(conn).get_angle()
+        self.assertEqual(conn.sent, ["GetAngle()"])
+        self.assertEqual((result.j1, result.j2, result.j3, result.j4), (0.0, 20.0, 60.0, 0.0))
 
     def test_dashboard_control_verbs_wiring(self):
         for method, command in [

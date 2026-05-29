@@ -21,7 +21,14 @@ from typing import Optional
 from robot_core.transport.connection import FramedConnection
 
 from . import builders
-from .responses import DashboardResponse, parse_response
+from .responses import (
+    AngleResult,
+    DashboardResponse,
+    PoseResult,
+    parse_angle,
+    parse_pose,
+    parse_response,
+)
 
 
 class _CommandChannel:
@@ -79,11 +86,13 @@ class DashboardClient(_CommandChannel):
     def robot_mode(self) -> DashboardResponse:
         return self._send(builders.robot_mode())
 
-    def get_pose(self) -> DashboardResponse:
-        return self._send(builders.get_pose())
+    def get_pose(self) -> PoseResult:
+        """Query the current Cartesian pose as a typed :class:`PoseResult`."""
+        return parse_pose(self._send(builders.get_pose()))
 
-    def get_angle(self) -> DashboardResponse:
-        return self._send(builders.get_angle())
+    def get_angle(self) -> AngleResult:
+        """Query the current joint angles as a typed :class:`AngleResult`."""
+        return parse_angle(self._send(builders.get_angle()))
 
     def get_error_id(self) -> DashboardResponse:
         return self._send(builders.get_error_id())

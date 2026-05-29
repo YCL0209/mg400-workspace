@@ -34,6 +34,38 @@ class DashboardResponse:
         return self.error_id == 0
 
 
+@dataclass(frozen=True)
+class PoseResult:
+    """Parsed GetPose reply: Cartesian (x, y, z, r) in mm/deg. Fields are None
+    when the controller returned an error (``error_id != 0``)."""
+
+    error_id: int
+    x: "float | None" = None
+    y: "float | None" = None
+    z: "float | None" = None
+    r: "float | None" = None
+
+    @property
+    def is_ok(self) -> bool:
+        return self.error_id == 0
+
+
+@dataclass(frozen=True)
+class AngleResult:
+    """Parsed GetAngle reply: joint angles (j1..j4) in deg. Fields are None when
+    the controller returned an error (``error_id != 0``)."""
+
+    error_id: int
+    j1: "float | None" = None
+    j2: "float | None" = None
+    j3: "float | None" = None
+    j4: "float | None" = None
+
+    @property
+    def is_ok(self) -> bool:
+        return self.error_id == 0
+
+
 def parse_response(message: str) -> DashboardResponse:
     """Parse one already-framed reply (no trailing ``;``) into a DashboardResponse.
 
@@ -55,6 +87,34 @@ def parse_response(message: str) -> DashboardResponse:
     right = text.rfind("}")
     payload = text[left + 1 : right] if left != -1 and right > left else ""
     return DashboardResponse(error_id=error_id, payload=payload, raw=text)
+
+
+def _four_floats(payload: str) -> "tuple[float, float, float, float]":
+    """Parse a 4-value comma-separated payload (X,Y,Z,R or J1,J2,J3,J4)."""
+    parts = [p for p in payload.split(",") if p.strip() != ""]
+    if len(parts) != 4:
+        raise ProtocolResponseError(f"expected 4 comma-separated values, got {payload!r}")
+    try:
+        a, b, c, d = (float(p) for p in parts)
+    except ValueError as exc:
+        raise ProtocolResponseError(f"non-numeric value in payload {payload!r}") from exc
+    return a, b, c, d
+
+
+def parse_pose(response: DashboardResponse) -> PoseResult:
+    """Type a GetPose reply into a :class:`PoseResult` (no values on error)."""
+    if not response.is_ok:
+        return PoseResult(response.error_id)
+    x, y, z, r = _four_floats(response.payload)
+    return PoseResult(response.error_id, x, y, z, r)
+
+
+def parse_angle(response: DashboardResponse) -> AngleResult:
+    """Type a GetAngle reply into an :class:`AngleResult` (no values on error)."""
+    if not response.is_ok:
+        return AngleResult(response.error_id)
+    j1, j2, j3, j4 = _four_floats(response.payload)
+    return AngleResult(response.error_id, j1, j2, j3, j4)
 
 
 def extract_responses(buffer: bytes) -> "tuple[list[DashboardResponse], bytes]":
