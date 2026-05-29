@@ -29,6 +29,13 @@ class BuilderStringTests(unittest.TestCase):
         self.assertEqual(builders.get_angle(), "GetAngle()")
         self.assertEqual(builders.get_error_id(), "GetErrorID()")
 
+    def test_control_verb_commands(self):
+        # Continue is the SDK-PDF capitalization (reference fork's lowercase
+        # continue() is treated as fork staleness).
+        self.assertEqual(builders.continue_(), "Continue()")
+        self.assertEqual(builders.start_drag(), "StartDrag()")
+        self.assertEqual(builders.stop_drag(), "StopDrag()")
+
     def test_speed_factor_integer_format(self):
         self.assertEqual(builders.speed_factor(50), "SpeedFactor(50)")
         self.assertEqual(builders.speed_factor(1), "SpeedFactor(1)")
@@ -135,6 +142,24 @@ class ClientWiringTests(unittest.TestCase):
         resp = DashboardClient(conn).get_pose()
         self.assertEqual(conn.sent, ["GetPose()"])
         self.assertEqual(resp.payload, "1.0,2.0,3.0,4.0")
+
+    def test_dashboard_control_verbs_wiring(self):
+        for method, command in [
+            ("continue_", "Continue()"),
+            ("start_drag", "StartDrag()"),
+            ("stop_drag", "StopDrag()"),
+        ]:
+            conn = _FakeConnection(f"0,{{}},{command}")
+            resp = getattr(DashboardClient(conn), method)()
+            self.assertEqual(conn.sent, [command])
+            self.assertTrue(resp.is_ok)
+
+    def test_dashboard_control_verb_error_path(self):
+        # A reject reply (-1) surfaces as error_id, never an exception.
+        conn = _FakeConnection("-1,{},StartDrag()")
+        resp = DashboardClient(conn).start_drag()
+        self.assertEqual(resp.error_id, -1)
+        self.assertFalse(resp.is_ok)
 
     def test_emergency_stop_only_on_dashboard_client(self):
         # Channel separation: E-stop is a dashboard command, not on MoveClient.

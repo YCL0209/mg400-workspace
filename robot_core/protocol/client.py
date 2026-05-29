@@ -64,6 +64,18 @@ class DashboardClient(_CommandChannel):
     def speed_factor(self, percent: int) -> DashboardResponse:
         return self._send(builders.speed_factor(percent))
 
+    def continue_(self) -> DashboardResponse:
+        """Resume the move queue (also the queue-recovery step after ClearError)."""
+        return self._send(builders.continue_())
+
+    def start_drag(self) -> DashboardResponse:
+        """Enter software drag/teach mode (replaces the physical unlock button)."""
+        return self._send(builders.start_drag())
+
+    def stop_drag(self) -> DashboardResponse:
+        """Leave software drag/teach mode."""
+        return self._send(builders.stop_drag())
+
     def robot_mode(self) -> DashboardResponse:
         return self._send(builders.robot_mode())
 

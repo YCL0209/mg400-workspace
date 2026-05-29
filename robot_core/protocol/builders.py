@@ -132,6 +132,28 @@ def speed_factor(percent: int) -> str:
     return f"SpeedFactor({value:d})"
 
 
+def continue_() -> str:
+    """Resume a paused move queue.
+
+    Pairs with ``Pause()`` and is the required follow-up to ``ClearError()`` when
+    recovering the queue after an alarm. String per the SDK PDF (controller
+    1.7.0.0): ``Continue()``. The reference Python fork sends lowercase
+    ``continue()`` — treated as fork staleness; confirm on hardware in Phase 5.
+    """
+    return "Continue()"
+
+
+def start_drag() -> str:
+    """Enter software drag/teach mode (gravity compensation), the programmatic
+    replacement for the physical unlock button. Only valid while enabled."""
+    return "StartDrag()"
+
+
+def stop_drag() -> str:
+    """Leave software drag/teach mode."""
+    return "StopDrag()"
+
+
 # -- Move commands (port 30003) --------------------------------------------
 
 def mov_l(x: float, y: float, z: float, r: float) -> str:
