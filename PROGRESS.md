@@ -290,6 +290,22 @@ dash.sendall(b"RobotMode();")
 
 **注意**:這不一定否定 finding 16(雙 enable trap)。可能兩條都存在(獨立 trap),也可能只有 17 是真的、16 的 -10000 從頭到尾都是 3-port 缺造成的。修完上手臂驗證後回頭改寫 finding 16。
 
+### 18. **📜 線上 byte 格式以 demo 為準:送端帶 `;` 是 code-vs-doc 漂移(2026-06-01)**
+
+**現象**:三埠 mount 成功(finding 17 修法上線)後實機跑 workbench `enable` → 仍回 `-10000,{},`。三埠連好、不是 finding 17、也沒雙 enable(finding 16),新症狀。
+
+**對比審計發現**(`COMPARISON_REPORT.md`,worktree branch `worktree-comparison-report`):我們 `transport/connection.py:223` 在送指令時 `+ self._terminator`,送線是 `EnableRobot();`,**但 reference fork 的 `send_data` 從不加 `;`**(送 `EnableRobot()`)。CLAUDE.md「`;` 規則」段也明文「送不加 `;`」——也就是 **code 早就漂離 doc**,只是沒人盯。Finding 17 的 ad-hoc probe 剛好也帶 `;` 而通了,所以這個分歧躲過早期偵測。
+
+**原則(寫進 CLAUDE.md 第一規則)**:**reference demo 是「真的能操控硬體」的證明,凡屬線上 byte 格式以 demo 為準**——demo 跑通了多年,我們是新人。發現我們 code 跟 demo 線上格式不一致,**先假設我們錯**,回頭對齊 demo,再回頭證明 demo 錯(要有實機證據)。
+
+**修法(commit `3d623c1`)**:`connection.py:223` 去掉 `+ self._terminator` → 送 `b"EnableRobot()"`。Docstring 補對齊 demo 的說明。`test_framing.py` 對應 assertion 從 `b"EnableRobot();"` → `b"EnableRobot()"`。175 unit tests 仍全綠。
+
+**收端 `_terminator` 不動**:`extract_frames` 仍按 `;` 切框(line 238);PR #9 雙 `;` 殘留清除也不受影響——那都是「收端」邏輯,協定真理。
+
+**待實機確認**(尚未驗):Windows pull 後 workbench `mode` 應該回 `0,{...},RobotMode();` 而非 -10000。**如果仍 -10000 → `;` 不是元兇**,要回頭查 dashboard 模式設定(finding 11)/ 雙 enable 殘留(finding 16)/ 控制器 power-cycle。
+
+**Lesson**:CLAUDE.md 的協定規則段是寫給未來的自己看的——code 漂離 doc 沒人發現,因為「能跑」沒人盯。下次新增一條 wire-format 規則時,在 PR 加一條 unit test 把「送出 byte 字面值」釘住,讓漂移在 review 時可見。
+
 ---
 
 ## FK 校驗資料(10 筆真實配對,法蘭中心,mm/deg)
