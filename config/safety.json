@@ -1,13 +1,13 @@
 {
   "_meta": {
-    "version": "phase-2b-v1",
-    "date": "2026-05-29",
+    "version": "phase-2b-v1.5",
+    "date": "2026-06-01",
     "source_data": [
       "outputs/limits_20260529_132808.json (7 outer reach points)",
       "outputs/limits_20260529_134228.json (5 J2/J3 coupling points)",
       "outputs/limits_20260529_135459.json (1 z_floor point)"
     ],
-    "provenance": "Empirically calibrated from 13 real-arm limit points collected via workbench on 2026-05-29. Workspace annulus, z limits, and J1 ranges derived from measured extremes. J2/J3 upper bounds from measured. J2/J3/J4 lower bounds use spec values since not empirically probed. Coupling polygon NOT fitted in v1 — data shows non-linear envelope that calibrate_bounds v1's linear regression can't capture; pending Phase 2b v2."
+    "provenance": "Same 13-point real-arm dataset as v1. Re-processed by the T7A v2 calibrator (PR phase-2b-v2-calibrate). Numbers unchanged from v1; this bump records (a) the new calibrator capability and (b) that v2's polygon fit was attempted and intentionally NOT deployed because the v1 capture's coupling-probe data underestimates the true boundary (see _coupling_note). Polygon deployment deferred to v2 (T7B re-probe)."
   },
 
   "workspace": {
@@ -15,13 +15,13 @@
     "annulus_outer_radius_mm": 440.0,
     "z_min_mm": -197.05,
     "z_max_mm": 116.21,
-    "j1_rear_dead_zone_deg": 40.0,
+    "j1_rear_dead_zone_deg": 40.21,
     "_provenance": {
-      "annulus_inner": "calibrate_bounds output, 20mm margin from observed min planar radius",
-      "annulus_outer": "calibrate_bounds output, clamped at spec reach 440mm. Real arm reached ρ≈436mm at outer_left45.",
+      "annulus_inner": "calibrate_bounds v2, 20mm margin from observed min planar radius",
+      "annulus_outer": "calibrate_bounds v2, clamped at spec reach 440mm. Real arm reached ρ≈436mm at outer_left45.",
       "z_min": "observed at floor_0 (J2=82.8, J3=77.3, J4=81.2), bare flange touching tabletop. Future tools: z_min_effective = z_min + tool.z_offset_mm.",
       "z_max": "observed only — not explicitly probed. Real arm can likely go higher (spec workspace ~280mm above origin).",
-      "j1_rear_dead_zone": "spec value retained. Real arm reached J1=±157~159° in outer_left135/right135 → confirms ~40° rear gap (360° − 2×160° = 40°)."
+      "j1_rear_dead_zone": "now derived from data (was placeholder-capped at 40° in v1). 2 × (180° − max(|J1|)) = 2 × (180° − 159.9°) = 40.2°."
     }
   },
 
@@ -31,33 +31,29 @@
     "J3": [-25.0, 77.3],
     "J4": [-180.0, 180.0],
     "_provenance": {
-      "J1": "both ends intentionally pushed to limit during outer_left135/right135采集",
-      "J2": "upper bound from floor_0 (J2=82.8, pushed to limit). Lower bound: spec value -25° retained (real arm not pushed to J2 lower limit during采集; observed min was -14.7° during coupling test).",
-      "J3": "upper bound from floor_0 (J3=77.3, pushed to limit). Lower bound: spec value -25° retained (real arm not pushed to J3 lower limit).",
-      "J4": "spec range retained — J4 was not exercised during Phase 2b采集 (observed range was a random subset)."
+      "note": "v2 calibrator applies spec-fallback automatically for un-probed sides. J3 upper is kept at the observed coupling-limited value 77.3° (NOT the spec 105°) for the same reason coupling polygon is deferred: without a trusted polygon, per-axis J3 spec would over-permit (J2=0, J3=90 would pass even though real arm alarms ~55).",
+      "J1": "both ends intentionally pushed to limit during outer_left135/right135",
+      "J2_upper": "from floor_0 (J2=82.8, pushed to limit)",
+      "J2_lower": "spec fallback (observed min -14.7°, 10.3° from spec → not trusted)",
+      "J3_upper": "MANUAL OVERRIDE — kept at v1 observed cap 77.3° because no trusted coupling polygon. Calibrator suggests 105° (spec) but that's only safe when paired with a polygon.",
+      "J3_lower": "spec fallback (real arm not pushed to J3 lower limit)",
+      "J4": "spec fallback — J4 was not exercised (random subset)"
     }
   },
 
   "j2_j3_coupling": [],
 
   "_coupling_note": {
-    "status": "NOT_FITTED_IN_V1",
-    "reason": "Real arm data shows non-linear coupling envelope that calibrate_bounds v1 (linear regression with J3>50 filter) cannot capture.",
-    "observed_data": {
-      "(J2=-14.7, J3max=44.5)": "boundary",
-      "(J2=-7.4, J3max=50.4)":  "boundary, rising linearly with J2",
-      "(J2=+14.1, J3max=55.3)": "boundary, approaching saturation",
-      "(J2=+29.3, J3max=55.5)": "boundary, saturated near ~55°",
-      "(J2=+63.9, J3max=35.7)": "Z_FLOOR_MASQUERADING — limit is table collision, not coupling"
-    },
-    "v1_protection_gap": "Without coupling polygon, safety only enforces per-axis J3 ≤ 77.3°. Some (J2, J3) combinations will pass safety but alarm at controller (e.g., J2=0, J3=70 — passes per-axis check but real arm alarms because at J2=0 the coupling limit is J3 ≈ 55).",
-    "fallback_behavior": "When Phase 5 sends MovL violating real coupling, controller alarms → mid-motion error. Safety layer not catching, but no hardware damage (controller's own safety catches). Plan: Phase 2b v2 upgrade calibrate_bounds + collect more points.",
-    "v2_plan": [
-      "Upgrade calibrate_bounds to handle non-linear / piecewise envelope",
-      "Detect z_floor masqueraders (high J2 + low J3 patterns)",
-      "Collect 5~8 additional coupling points at mid-z height (avoiding table interference)",
-      "Output piecewise linear or polygon constraint set"
-    ]
+    "status": "DEFERRED_TO_T7B",
+    "v2_algorithm_ready": "calibrate_bounds v2 (T7A) can FIT a 2-segment piecewise envelope from coupling data: select_coupling_points → filter_masquerading_points (J2_cutoff=50°, z_proximity=30mm) → fit_piecewise_envelope. Running it on the v1 capture produces coup_rising / coup_flat (see outputs/calibrated_bounds_*.json for the result).",
+    "why_not_deployed_from_v1_data": "The fitted polygon rejects the factory pose (J2=0, J3≈60) which is a known-safe stable arm position (PROGRESS finding 4 / calibration pair A1). The v1 coupling probe points captured operator-judged J3 maxima of 50.4 (at J2=-7.4) and 55.3 (at J2=+14.1) — conservative boundaries that mathematically rule out the home pose. Either the probe technique was conservative (stopped before true alarm) or the alarm behavior differs between jog-into-limit vs static-hold, but either way: deploying a polygon that rejects home would block every Phase 5 motion from starting.",
+    "next_step_T7B": [
+      "Re-probe coupling points with explicit 'push J3 until alarm fires' protocol (vs operator judgment).",
+      "Capture J2 ∈ {-15, -10, -5, 0, +5, +10, +20, +30, +40} sweep at safe mid-z height to avoid table interference.",
+      "Sanity test: fitted polygon must accept factory pose (J2=0, J3=60) and reject known-alarm poses.",
+      "Then deploy the polygon to this config."
+    ],
+    "v1_protection_gap_in_meantime": "Without polygon, safety only enforces per-axis J3 ≤ 77.3° (the observed coupling-limited max at floor_0). Some (J2, J3) combinations will pass safety but alarm at controller mid-motion — known limitation, controller's own safety catches without hardware damage."
   },
 
   "_future_tool_offset": {

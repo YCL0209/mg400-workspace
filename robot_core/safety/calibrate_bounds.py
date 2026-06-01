@@ -35,6 +35,23 @@ DEFAULT_INNER_MARGIN_MM = 20.0  # Buffer inside the singularity column
 DEFAULT_OUTER_MARGIN_MM = 10.0  # Buffer from maximum reach
 DEFAULT_Z_MARGIN_MM = 5.0       # Buffer from z limits
 
+# Per-axis theoretical ranges from the SDK doc — the fallback when a side of an
+# axis was not pushed close enough to the limit during a probe session. Kept
+# here as safety-domain constants (not imported from the protocol layer; T7A
+# refactor — see PROGRESS finding 13 / safety_v1.json provenance for context).
+JOINT_SPEC_RANGES_DEG: "dict[str, tuple[float, float]]" = {
+    "J1": (-160.0, 160.0),
+    "J2": (-25.0, 85.0),
+    "J3": (-25.0, 105.0),
+    "J4": (-180.0, 180.0),
+}
+
+# How close the observed extreme must come to spec for us to trust it as "this
+# side was actually probed". Beyond this gap we fall back to spec, so a random
+# in-session sample (e.g. J4 wandering between -106° and +159° during a J2/J3
+# coupling probe) is not silently encoded as the safe envelope.
+OBSERVED_TO_SPEC_THRESHOLD_DEG = 10.0
+
 
 @dataclass
 class CalibrationResult:
@@ -84,86 +101,228 @@ def load_limit_points(path: Path) -> list[dict]:
     return data["points"]
 
 
-def derive_joint_ranges(points: list[dict]) -> dict[str, tuple[float, float]]:
-    """Extract min/max for each joint axis from the observations."""
-    if not points:
-        # Return default ranges if no points
-        return {
-            "J1": (-160.0, 160.0),
-            "J2": (-25.0, 85.0),
-            "J3": (-25.0, 105.0),
-            "J4": (-180.0, 180.0),
-        }
-    
-    # Find observed extremes
-    j1_values = [p["j1"] for p in points]
-    j2_values = [p["j2"] for p in points]
-    j3_values = [p["j3"] for p in points]
-    j4_values = [p["j4"] for p in points]
-    
+def _pick_axis_side(
+    observed: float, spec: float, side: str,
+    threshold: float = OBSERVED_TO_SPEC_THRESHOLD_DEG,
+) -> float:
+    """Choose observed vs spec for one side of one axis.
+
+    ``side`` is ``"low"`` or ``"high"``. The observed value is trusted only when
+    it came within ``threshold`` of spec on that side (i.e. the operator
+    actually probed that limit); otherwise we fall back to spec so that an
+    un-probed side does not get encoded as a tight envelope from random samples.
+    A value that exceeds spec on its side (e.g. real-arm J1 reaching ±165°) is
+    always trusted.
+    """
+    if side == "low":
+        # observed_low close to (or past) spec_low → trust observed.
+        if observed <= spec + threshold:
+            return observed
+        return spec
+    if side == "high":
+        if observed >= spec - threshold:
+            return observed
+        return spec
+    raise ValueError(f"side must be 'low' or 'high', got {side!r}")
+
+
+def _observed_extremes(points: list[dict]) -> "dict[str, tuple[float, float]]":
+    """Raw (min, max) per axis — purely observed, no spec fallback.
+
+    Used internally by :func:`compute_workspace_limits` so its FK grid scan
+    samples only joint configurations the operator actually reached. The public
+    :func:`derive_joint_ranges` (with spec fallback) is the safety-envelope
+    *output*, not the right thing to grid-scan over for workspace estimation
+    (scanning over un-probed spec configurations would silently widen the
+    workspace into territory the arm was never verified to reach safely).
+    """
     return {
-        "J1": (min(j1_values), max(j1_values)),
-        "J2": (min(j2_values), max(j2_values)),
-        "J3": (min(j3_values), max(j3_values)),
-        "J4": (min(j4_values), max(j4_values)),
+        axis: (min(vals), max(vals))
+        for axis, vals in {
+            "J1": [p["j1"] for p in points],
+            "J2": [p["j2"] for p in points],
+            "J3": [p["j3"] for p in points],
+            "J4": [p["j4"] for p in points],
+        }.items()
     }
 
 
-def fit_j2_j3_coupling(points: list[dict]) -> list[CouplingConstraint]:
-    """Fit linear half-plane constraints for J2/J3 coupling.
-    
-    The coupling manifests as reduced J3 range when J2 is extended. We fit
-    constraints of the form: a*J2 + b*J3 <= c
-    
-    For simplicity, we identify key boundary patterns:
-    1. Upper J3 limit decreases with J2 (positive J2 coefficient)
-    2. Lower J3 limit may increase with J2 (negative J2 coefficient)
+def derive_joint_ranges(points: list[dict]) -> dict[str, tuple[float, float]]:
+    """Extract per-axis (low, high) from observations, falling back to spec on
+    sides that were not probed close enough (see :data:`OBSERVED_TO_SPEC_THRESHOLD_DEG`)."""
+    if not points:
+        # Nothing observed → spec across the board.
+        return dict(JOINT_SPEC_RANGES_DEG)
+
+    ranges: "dict[str, tuple[float, float]]" = {}
+    for axis, (obs_low, obs_high) in _observed_extremes(points).items():
+        spec_low, spec_high = JOINT_SPEC_RANGES_DEG[axis]
+        low = _pick_axis_side(obs_low, spec_low, "low")
+        high = _pick_axis_side(obs_high, spec_high, "high")
+        ranges[axis] = (low, high)
+    return ranges
+
+
+# --- T7A coupling-fit helpers ---------------------------------------------
+#
+# The v1 ``fit_j2_j3_coupling`` (below) over-filters its inputs and fits a
+# single linear regression — it can't represent the real "rising → flat"
+# envelope MG400 shows (PROGRESS finding 13) and silently returns an empty
+# polygon. T7A introduces these helpers as the building blocks of the new
+# piecewise fit; C2 lands them dormant (with tests), C3 wires them into
+# ``fit_j2_j3_coupling`` to replace the old logic.
+
+DEFAULT_J2_CUTOFF_DEG = 50.0
+"""Above this |J2|, the J3 limit is dominated by geometric/table collision rather
+than parallel-linkage coupling — exclude such points from the coupling fit."""
+
+DEFAULT_Z_FLOOR_PROXIMITY_MM = 30.0
+"""A coupling point whose FK z lands within this distance of the detected table
+is likely a z_floor masquerade (its J3 limit came from the table, not coupling)."""
+
+
+def select_coupling_points(points: list[dict]) -> list[dict]:
+    """Return points the operator labeled as J2/J3 coupling boundaries.
+
+    Case-insensitive substring match on ``"coup"`` in the label. Replaces the
+    v1 multi-clause filter (which conflated coupling, non-zero-joint, and
+    keyword heuristics and dropped genuine boundary points like J2=-14.7 / J3=44.5).
     """
-    constraints = []
-    
-    # Filter points that seem to be at J2/J3 limits
-    # (where label suggests coupling or where J2 and J3 are both non-zero and significant)
-    coupling_points = [
-        p for p in points
-        if ("j2" in p.get("label", "").lower() and "j3" in p.get("label", "").lower())
-        or ("coupl" in p.get("label", "").lower())
-        or (abs(p["j2"]) > 30 and abs(p["j3"]) > 30)  # Both joints significantly displaced
+    return [p for p in points if "coup" in p.get("label", "").lower()]
+
+
+def detect_z_floor(
+    points: list[dict],
+    kinematics_config: Optional[KinematicsConfig] = None,
+) -> "float | None":
+    """Identify the table z (FK frame) from observations.
+
+    Prefer points labelled with ``"floor"`` (substring, case-insensitive); when
+    none exist, fall back to the minimum FK z across the whole point set.
+    Returns ``None`` if there are no points.
+    """
+    if not points:
+        return None
+    floor_points = [p for p in points if "floor" in p.get("label", "").lower()]
+    reference = floor_points if floor_points else points
+    z_values = [
+        forward_kinematics(p["j1"], p["j2"], p["j3"], p["j4"], config=kinematics_config)[2]
+        for p in reference
     ]
-    
-    if len(coupling_points) >= 2:
-        # Fit upper constraint (J3 decreases as J2 increases)
-        # Find points that seem to be at upper J3 boundary
-        upper_points = [p for p in coupling_points if p["j3"] > 50]
-        if len(upper_points) >= 2:
-            # Simple linear fit: find the line through extreme points
-            # For upper bound: maximize J2 + J3 weighted
-            j2_max = max(p["j2"] for p in upper_points)
-            j3_at_j2_max = max(p["j3"] for p in upper_points if abs(p["j2"] - j2_max) < 5)
-            
-            j2_min = min(p["j2"] for p in upper_points)
-            j3_at_j2_min = max(p["j3"] for p in upper_points if abs(p["j2"] - j2_min) < 5)
-            
-            if j2_max - j2_min > 10:  # Meaningful range
-                # Fit line: J3 = m*J2 + b, convert to a*J2 + b*J3 <= c
-                # Two points: (j2_min, j3_at_j2_min), (j2_max, j3_at_j2_max)
-                if j3_at_j2_min > j3_at_j2_max:  # J3 decreases with J2
-                    # Approximate the constraint
-                    # We want: J2/j2_range + J3/j3_range <= 1 (normalized)
-                    # Or: J3 <= j3_max - k*(J2 - j2_0)
-                    slope = (j3_at_j2_max - j3_at_j2_min) / (j2_max - j2_min)
-                    # Convert to half-plane: -slope*J2 + J3 <= intercept
-                    intercept = j3_at_j2_min - slope * j2_min
-                    constraints.append(
-                        CouplingConstraint(
-                            j2_coeff=-slope,
-                            j3_coeff=1.0,
-                            max_value=intercept,
-                            label="J3_upper_coupling"
-                        )
-                    )
-    
-    # If no coupling found, return empty list (only per-axis limits apply)
+    return min(z_values)
+
+
+def filter_masquerading_points(
+    coupling_points: list[dict],
+    z_floor: "float | None",
+    j2_cutoff: float = DEFAULT_J2_CUTOFF_DEG,
+    z_proximity: float = DEFAULT_Z_FLOOR_PROXIMITY_MM,
+    kinematics_config: Optional[KinematicsConfig] = None,
+) -> list[dict]:
+    """Drop coupling points whose J3 limit isn't really from coupling.
+
+    Two filters: (1) ``|J2| > j2_cutoff`` (high J2 makes table/collision
+    dominate the J3 limit, contaminating the fit); (2) FK z within
+    ``z_proximity`` of ``z_floor`` (point is at the table, not at the coupling
+    envelope). The second filter is skipped when ``z_floor is None``.
+    """
+    kept: list[dict] = []
+    for p in coupling_points:
+        if abs(p["j2"]) > j2_cutoff:
+            continue
+        if z_floor is not None:
+            z = forward_kinematics(
+                p["j1"], p["j2"], p["j3"], p["j4"], config=kinematics_config
+            )[2]
+            if abs(z - z_floor) < z_proximity:
+                continue
+        kept.append(p)
+    return kept
+
+
+def fit_piecewise_envelope(
+    coupling_points: list[dict],
+    j3_sat_band_deg: float = 5.0,
+    safety_margin_deg: float = 3.0,
+) -> list[CouplingConstraint]:
+    """Fit a 2-segment piecewise linear envelope (rising → flat) over J3_max(J2).
+
+    The returned constraints' conjunction (each must hold — gate's existing
+    semantics) reproduces the minimum of the two segments at any J2, i.e. the
+    actual envelope. Pivot heuristic: any coupling point whose J3 is within
+    ``j3_sat_band_deg`` of the observed maximum is "in the flat region",
+    everything else is "rising". Outputs are tightened by ``safety_margin_deg``
+    for conservative gating.
+
+    Returns an empty list when the data is too sparse to support two segments.
+    """
+    if len(coupling_points) < 3:
+        return []
+
+    j3_max_observed = max(p["j3"] for p in coupling_points)
+    sat_threshold = j3_max_observed - j3_sat_band_deg
+    flat_pts = [p for p in coupling_points if p["j3"] >= sat_threshold]
+    rising_pts = [p for p in coupling_points if p["j3"] < sat_threshold]
+
+    constraints: list[CouplingConstraint] = []
+
+    # Rising segment: stdlib least-squares fit J3 = a*J2 + b → -a*J2 + J3 <= b.
+    if len(rising_pts) >= 2:
+        n = len(rising_pts)
+        sx = sum(p["j2"] for p in rising_pts)
+        sy = sum(p["j3"] for p in rising_pts)
+        sxx = sum(p["j2"] ** 2 for p in rising_pts)
+        sxy = sum(p["j2"] * p["j3"] for p in rising_pts)
+        denom = n * sxx - sx * sx
+        if abs(denom) > 1e-9:
+            a = (n * sxy - sx * sy) / denom
+            b = (sy - a * sx) / n
+            constraints.append(CouplingConstraint(
+                j2_coeff=-a,
+                j3_coeff=1.0,
+                max_value=b - safety_margin_deg,
+                label="coup_rising",
+            ))
+
+    # Flat segment: J3 <= K where K = min(j3 in flat region) - margin.
+    if flat_pts:
+        K = min(p["j3"] for p in flat_pts) - safety_margin_deg
+        constraints.append(CouplingConstraint(
+            j2_coeff=0.0,
+            j3_coeff=1.0,
+            max_value=K,
+            label="coup_flat",
+        ))
+
     return constraints
+
+
+def fit_j2_j3_coupling(
+    points: list[dict],
+    kinematics_config: Optional[KinematicsConfig] = None,
+    j2_cutoff: float = DEFAULT_J2_CUTOFF_DEG,
+    z_proximity: float = DEFAULT_Z_FLOOR_PROXIMITY_MM,
+) -> list[CouplingConstraint]:
+    """Fit a piecewise (rising → flat) J2/J3 coupling envelope.
+
+    Pipeline: ``select_coupling_points`` (label-based) →
+    ``filter_masquerading_points`` (drops |J2|>cutoff and FK z within proximity
+    of detected z_floor) → ``fit_piecewise_envelope`` (2-segment least-squares).
+    Returns up to two CouplingConstraint objects whose conjunction encodes the
+    real envelope; empty list when the data is too sparse.
+    """
+    coupling_points = select_coupling_points(points)
+    if not coupling_points:
+        return []
+    z_floor = detect_z_floor(points, kinematics_config=kinematics_config)
+    clean = filter_masquerading_points(
+        coupling_points,
+        z_floor=z_floor,
+        j2_cutoff=j2_cutoff,
+        z_proximity=z_proximity,
+        kinematics_config=kinematics_config,
+    )
+    return fit_piecewise_envelope(clean)
 
 
 def compute_workspace_limits(
@@ -194,11 +353,14 @@ def compute_workspace_limits(
         radii.append(radius)
         z_values.append(z)
     
-    # Also scan a grid of joint configurations for better coverage
-    joint_ranges = derive_joint_ranges(points)
-    j1_min, j1_max = joint_ranges["J1"]
-    j2_min, j2_max = joint_ranges["J2"]
-    j3_min, j3_max = joint_ranges["J3"]
+    # Also scan a grid of joint configurations for better coverage. Use raw
+    # observed extremes (not the spec-fallback ranges from derive_joint_ranges):
+    # the workspace estimate must reflect what the arm was actually verified
+    # to reach, not what spec permits but the operator never probed.
+    observed = _observed_extremes(points)
+    j1_min, j1_max = observed["J1"]
+    j2_min, j2_max = observed["J2"]
+    j3_min, j3_max = observed["J3"]
     
     # Sample joint space (coarse grid)
     for j1 in [j1_min, 0, j1_max]:
@@ -238,11 +400,12 @@ def derive_j1_dead_zone(points: list[dict]) -> float:
         # Find the closest approach to ±180°
         j1_values = [p["j1"] for p in rear_points]
         min_angle_from_rear = min(180 - abs(j1) for j1 in j1_values)
-        # Dead zone is twice this distance (symmetric)
-        dead_zone = 2 * min_angle_from_rear
-        return min(dead_zone, 40.0)  # Cap at known maximum
-    
-    # Default conservative value
+        # Dead zone is twice that distance (symmetric). Trust the data — the
+        # real arm sometimes has a slightly larger rear gap than spec (v1
+        # data: ±159.9° / +157° → 43°, vs spec 40°). No artificial cap.
+        return 2 * min_angle_from_rear
+
+    # No rear-approach observation → fall back to spec dead zone (360° − 2×160°).
     return 40.0
 
 
