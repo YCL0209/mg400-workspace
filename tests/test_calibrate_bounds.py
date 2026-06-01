@@ -12,8 +12,12 @@ from robot_core.safety.calibrate_bounds import (
     compute_workspace_limits,
     derive_j1_dead_zone,
     derive_joint_ranges,
+    detect_z_floor,
+    filter_masquerading_points,
     fit_j2_j3_coupling,
+    fit_piecewise_envelope,
     load_limit_points,
+    select_coupling_points,
 )
 
 
@@ -111,6 +115,106 @@ class TestJ2J3CouplingFit(unittest.TestCase):
 
         constraints = fit_j2_j3_coupling(points)
         self.assertEqual(len(constraints), 0)
+
+
+class TestCouplingHelpers(unittest.TestCase):
+    """Unit tests for the T7A coupling-fit helpers (C2 lands them dormant,
+    C3 wires them into fit_j2_j3_coupling)."""
+
+    def test_select_only_picks_coup_labeled(self):
+        points = [
+            {"j1": 0, "j2": 0, "j3": 60, "j4": 0, "label": "coup_j2_0"},
+            {"j1": 0, "j2": 14, "j3": 55, "j4": 0, "label": "COUPLING_j2_15"},  # case-insensitive
+            {"j1": 0, "j2": 0, "j3": 60, "j4": 0, "label": "outer_front"},
+            {"j1": 0, "j2": 0, "j3": 60, "j4": 0, "label": "floor_0"},
+            {"j1": 0, "j2": 0, "j3": 60, "j4": 0},  # no label key
+        ]
+        picked = select_coupling_points(points)
+        self.assertEqual(len(picked), 2)
+        self.assertEqual({p["label"] for p in picked}, {"coup_j2_0", "COUPLING_j2_15"})
+
+    def test_detect_z_floor_prefers_floor_label(self):
+        # A high-J2 floor-labelled point + a low-J2 non-floor point. The
+        # floor-label takes precedence even though the other has a lower FK z.
+        points = [
+            {"j1": 0, "j2": 82.8, "j3": 77.3, "j4": 0, "label": "floor_0"},  # FK z ≈ -201
+            {"j1": 0, "j2": -25.0, "j3": 105.0, "j4": 0, "label": "coup_low"},
+        ]
+        z = detect_z_floor(points)
+        self.assertIsNotNone(z)
+        self.assertAlmostEqual(z, -201.7, delta=2.0)  # FK of floor_0
+
+    def test_detect_z_floor_falls_back_to_min(self):
+        # No floor-labelled point → min FK z across all points.
+        points = [
+            {"j1": 0, "j2": 0, "j3": 60, "j4": 0, "label": "p1"},
+            {"j1": 0, "j2": 82.8, "j3": 77.3, "j4": 0, "label": "p2"},  # lowest z
+        ]
+        z = detect_z_floor(points)
+        self.assertIsNotNone(z)
+        self.assertLess(z, -100)  # well below origin
+
+    def test_detect_z_floor_empty(self):
+        self.assertIsNone(detect_z_floor([]))
+
+    def test_filter_drops_high_j2(self):
+        coupling = [
+            {"j1": 0, "j2": 14.1, "j3": 55.3, "j4": 0, "label": "coup_j2_14"},
+            {"j1": 0, "j2": 63.9, "j3": 35.7, "j4": 0, "label": "coup_j2_64"},  # > cutoff 50
+        ]
+        kept = filter_masquerading_points(coupling, z_floor=None, j2_cutoff=50.0)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["label"], "coup_j2_14")
+
+    def test_filter_drops_near_floor(self):
+        # Synthesize a coupling point whose FK z lands near a known z_floor.
+        coupling = [
+            {"j1": 0, "j2": -7.4, "j3": 50.4, "j4": 0, "label": "coup_clean"},   # FK z far above floor
+            {"j1": 0, "j2": 82.0, "j3": 76.0, "j4": 0, "label": "coup_at_floor"}, # FK z ≈ floor (but |J2|>50 will catch first)
+        ]
+        # Disable j2_cutoff (very high) so the z-proximity filter is what does the work
+        kept = filter_masquerading_points(
+            coupling, z_floor=-200.0, j2_cutoff=180.0, z_proximity=30.0
+        )
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["label"], "coup_clean")
+
+    def test_filter_no_z_floor_skips_z_check(self):
+        coupling = [{"j1": 0, "j2": 14.1, "j3": 55.3, "j4": 0, "label": "coup"}]
+        kept = filter_masquerading_points(coupling, z_floor=None, j2_cutoff=50.0)
+        self.assertEqual(len(kept), 1)
+
+    def test_piecewise_fits_finding13_shape(self):
+        # PROGRESS finding 13's clean 4 points (after dropping the contaminated J2=+63.9 one).
+        coupling = [
+            {"j1": 0, "j2": -14.7, "j3": 44.5, "j4": 0, "label": "coup"},
+            {"j1": 0, "j2":  -7.4, "j3": 50.4, "j4": 0, "label": "coup"},
+            {"j1": 0, "j2":  14.1, "j3": 55.3, "j4": 0, "label": "coup"},
+            {"j1": 0, "j2":  29.3, "j3": 55.5, "j4": 0, "label": "coup"},
+        ]
+        constraints = fit_piecewise_envelope(coupling)
+        # Expect two constraints: rising + flat
+        self.assertEqual(len(constraints), 2)
+        labels = {c.label for c in constraints}
+        self.assertEqual(labels, {"coup_rising", "coup_flat"})
+
+        # Flat: J3 <= ~55 (min of flat region 55.3/55.5 minus margin 3) ≈ 52.3
+        flat = next(c for c in constraints if c.label == "coup_flat")
+        self.assertEqual(flat.j2_coeff, 0.0)
+        self.assertEqual(flat.j3_coeff, 1.0)
+        self.assertAlmostEqual(flat.max_value, 52.3, delta=1.0)
+
+        # Rising: a positive coefficient on J2 (negative j2_coeff in -a*J2+J3<=b form)
+        rising = next(c for c in constraints if c.label == "coup_rising")
+        self.assertLess(rising.j2_coeff, 0)  # because original a > 0 (J3 rises with J2)
+        self.assertEqual(rising.j3_coeff, 1.0)
+
+    def test_piecewise_returns_empty_when_too_few(self):
+        coupling = [
+            {"j1": 0, "j2": 0, "j3": 50, "j4": 0, "label": "coup"},
+            {"j1": 0, "j2": 10, "j3": 55, "j4": 0, "label": "coup"},
+        ]
+        self.assertEqual(fit_piecewise_envelope(coupling), [])
 
 
 class TestWorkspaceLimits(unittest.TestCase):

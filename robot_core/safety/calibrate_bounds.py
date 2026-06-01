@@ -148,9 +148,143 @@ def derive_joint_ranges(points: list[dict]) -> dict[str, tuple[float, float]]:
     return ranges
 
 
+# --- T7A coupling-fit helpers ---------------------------------------------
+#
+# The v1 ``fit_j2_j3_coupling`` (below) over-filters its inputs and fits a
+# single linear regression — it can't represent the real "rising → flat"
+# envelope MG400 shows (PROGRESS finding 13) and silently returns an empty
+# polygon. T7A introduces these helpers as the building blocks of the new
+# piecewise fit; C2 lands them dormant (with tests), C3 wires them into
+# ``fit_j2_j3_coupling`` to replace the old logic.
+
+DEFAULT_J2_CUTOFF_DEG = 50.0
+"""Above this |J2|, the J3 limit is dominated by geometric/table collision rather
+than parallel-linkage coupling — exclude such points from the coupling fit."""
+
+DEFAULT_Z_FLOOR_PROXIMITY_MM = 30.0
+"""A coupling point whose FK z lands within this distance of the detected table
+is likely a z_floor masquerade (its J3 limit came from the table, not coupling)."""
+
+
+def select_coupling_points(points: list[dict]) -> list[dict]:
+    """Return points the operator labeled as J2/J3 coupling boundaries.
+
+    Case-insensitive substring match on ``"coup"`` in the label. Replaces the
+    v1 multi-clause filter (which conflated coupling, non-zero-joint, and
+    keyword heuristics and dropped genuine boundary points like J2=-14.7 / J3=44.5).
+    """
+    return [p for p in points if "coup" in p.get("label", "").lower()]
+
+
+def detect_z_floor(
+    points: list[dict],
+    kinematics_config: Optional[KinematicsConfig] = None,
+) -> "float | None":
+    """Identify the table z (FK frame) from observations.
+
+    Prefer points labelled with ``"floor"`` (substring, case-insensitive); when
+    none exist, fall back to the minimum FK z across the whole point set.
+    Returns ``None`` if there are no points.
+    """
+    if not points:
+        return None
+    floor_points = [p for p in points if "floor" in p.get("label", "").lower()]
+    reference = floor_points if floor_points else points
+    z_values = [
+        forward_kinematics(p["j1"], p["j2"], p["j3"], p["j4"], config=kinematics_config)[2]
+        for p in reference
+    ]
+    return min(z_values)
+
+
+def filter_masquerading_points(
+    coupling_points: list[dict],
+    z_floor: "float | None",
+    j2_cutoff: float = DEFAULT_J2_CUTOFF_DEG,
+    z_proximity: float = DEFAULT_Z_FLOOR_PROXIMITY_MM,
+    kinematics_config: Optional[KinematicsConfig] = None,
+) -> list[dict]:
+    """Drop coupling points whose J3 limit isn't really from coupling.
+
+    Two filters: (1) ``|J2| > j2_cutoff`` (high J2 makes table/collision
+    dominate the J3 limit, contaminating the fit); (2) FK z within
+    ``z_proximity`` of ``z_floor`` (point is at the table, not at the coupling
+    envelope). The second filter is skipped when ``z_floor is None``.
+    """
+    kept: list[dict] = []
+    for p in coupling_points:
+        if abs(p["j2"]) > j2_cutoff:
+            continue
+        if z_floor is not None:
+            z = forward_kinematics(
+                p["j1"], p["j2"], p["j3"], p["j4"], config=kinematics_config
+            )[2]
+            if abs(z - z_floor) < z_proximity:
+                continue
+        kept.append(p)
+    return kept
+
+
+def fit_piecewise_envelope(
+    coupling_points: list[dict],
+    j3_sat_band_deg: float = 5.0,
+    safety_margin_deg: float = 3.0,
+) -> list[CouplingConstraint]:
+    """Fit a 2-segment piecewise linear envelope (rising → flat) over J3_max(J2).
+
+    The returned constraints' conjunction (each must hold — gate's existing
+    semantics) reproduces the minimum of the two segments at any J2, i.e. the
+    actual envelope. Pivot heuristic: any coupling point whose J3 is within
+    ``j3_sat_band_deg`` of the observed maximum is "in the flat region",
+    everything else is "rising". Outputs are tightened by ``safety_margin_deg``
+    for conservative gating.
+
+    Returns an empty list when the data is too sparse to support two segments.
+    """
+    if len(coupling_points) < 3:
+        return []
+
+    j3_max_observed = max(p["j3"] for p in coupling_points)
+    sat_threshold = j3_max_observed - j3_sat_band_deg
+    flat_pts = [p for p in coupling_points if p["j3"] >= sat_threshold]
+    rising_pts = [p for p in coupling_points if p["j3"] < sat_threshold]
+
+    constraints: list[CouplingConstraint] = []
+
+    # Rising segment: stdlib least-squares fit J3 = a*J2 + b → -a*J2 + J3 <= b.
+    if len(rising_pts) >= 2:
+        n = len(rising_pts)
+        sx = sum(p["j2"] for p in rising_pts)
+        sy = sum(p["j3"] for p in rising_pts)
+        sxx = sum(p["j2"] ** 2 for p in rising_pts)
+        sxy = sum(p["j2"] * p["j3"] for p in rising_pts)
+        denom = n * sxx - sx * sx
+        if abs(denom) > 1e-9:
+            a = (n * sxy - sx * sy) / denom
+            b = (sy - a * sx) / n
+            constraints.append(CouplingConstraint(
+                j2_coeff=-a,
+                j3_coeff=1.0,
+                max_value=b - safety_margin_deg,
+                label="coup_rising",
+            ))
+
+    # Flat segment: J3 <= K where K = min(j3 in flat region) - margin.
+    if flat_pts:
+        K = min(p["j3"] for p in flat_pts) - safety_margin_deg
+        constraints.append(CouplingConstraint(
+            j2_coeff=0.0,
+            j3_coeff=1.0,
+            max_value=K,
+            label="coup_flat",
+        ))
+
+    return constraints
+
+
 def fit_j2_j3_coupling(points: list[dict]) -> list[CouplingConstraint]:
     """Fit linear half-plane constraints for J2/J3 coupling.
-    
+
     The coupling manifests as reduced J3 range when J2 is extended. We fit
     constraints of the form: a*J2 + b*J3 <= c
     
