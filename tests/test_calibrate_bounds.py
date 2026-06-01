@@ -284,12 +284,9 @@ class TestWorkspaceLimits(unittest.TestCase):
             points, inner_margin=0, outer_margin=0, z_margin=0
         )
 
-        # With margins large enough to clear the inner 100mm floor / outer 440mm
-        # spec cap. Sparse 1-point input falls back to spec-wide grid scan whose
-        # min radius collapses near zero and max radius pushes ~458mm (clamped),
-        # so a smaller margin gets fully absorbed; real 13-pt datasets don't hit this.
+        # With margins
         inner2, outer2, z_min2, z_max2 = compute_workspace_limits(
-            points, inner_margin=100, outer_margin=50, z_margin=5
+            points, inner_margin=20, outer_margin=10, z_margin=5
         )
 
         # Inner increases with margin (pushes away from center)

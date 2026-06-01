@@ -126,6 +126,27 @@ def _pick_axis_side(
     raise ValueError(f"side must be 'low' or 'high', got {side!r}")
 
 
+def _observed_extremes(points: list[dict]) -> "dict[str, tuple[float, float]]":
+    """Raw (min, max) per axis — purely observed, no spec fallback.
+
+    Used internally by :func:`compute_workspace_limits` so its FK grid scan
+    samples only joint configurations the operator actually reached. The public
+    :func:`derive_joint_ranges` (with spec fallback) is the safety-envelope
+    *output*, not the right thing to grid-scan over for workspace estimation
+    (scanning over un-probed spec configurations would silently widen the
+    workspace into territory the arm was never verified to reach safely).
+    """
+    return {
+        axis: (min(vals), max(vals))
+        for axis, vals in {
+            "J1": [p["j1"] for p in points],
+            "J2": [p["j2"] for p in points],
+            "J3": [p["j3"] for p in points],
+            "J4": [p["j4"] for p in points],
+        }.items()
+    }
+
+
 def derive_joint_ranges(points: list[dict]) -> dict[str, tuple[float, float]]:
     """Extract per-axis (low, high) from observations, falling back to spec on
     sides that were not probed close enough (see :data:`OBSERVED_TO_SPEC_THRESHOLD_DEG`)."""
@@ -133,17 +154,11 @@ def derive_joint_ranges(points: list[dict]) -> dict[str, tuple[float, float]]:
         # Nothing observed → spec across the board.
         return dict(JOINT_SPEC_RANGES_DEG)
 
-    by_axis = {
-        "J1": [p["j1"] for p in points],
-        "J2": [p["j2"] for p in points],
-        "J3": [p["j3"] for p in points],
-        "J4": [p["j4"] for p in points],
-    }
     ranges: "dict[str, tuple[float, float]]" = {}
-    for axis, values in by_axis.items():
+    for axis, (obs_low, obs_high) in _observed_extremes(points).items():
         spec_low, spec_high = JOINT_SPEC_RANGES_DEG[axis]
-        low = _pick_axis_side(min(values), spec_low, "low")
-        high = _pick_axis_side(max(values), spec_high, "high")
+        low = _pick_axis_side(obs_low, spec_low, "low")
+        high = _pick_axis_side(obs_high, spec_high, "high")
         ranges[axis] = (low, high)
     return ranges
 
@@ -338,11 +353,14 @@ def compute_workspace_limits(
         radii.append(radius)
         z_values.append(z)
     
-    # Also scan a grid of joint configurations for better coverage
-    joint_ranges = derive_joint_ranges(points)
-    j1_min, j1_max = joint_ranges["J1"]
-    j2_min, j2_max = joint_ranges["J2"]
-    j3_min, j3_max = joint_ranges["J3"]
+    # Also scan a grid of joint configurations for better coverage. Use raw
+    # observed extremes (not the spec-fallback ranges from derive_joint_ranges):
+    # the workspace estimate must reflect what the arm was actually verified
+    # to reach, not what spec permits but the operator never probed.
+    observed = _observed_extremes(points)
+    j1_min, j1_max = observed["J1"]
+    j2_min, j2_max = observed["J2"]
+    j3_min, j3_max = observed["J3"]
     
     # Sample joint space (coarse grid)
     for j1 in [j1_min, 0, j1_max]:
