@@ -478,5 +478,261 @@ class TestREPLIntegration(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(files), 1)
 
 
+def _snap(robot_mode=5, enable_status=1, error_status=0, q=(0.0, 0.0, 0.0, 0.0)):
+    """Convenience: build a RobotStateSnapshot with sane defaults for motion tests."""
+    return RobotStateSnapshot(
+        robot_mode=robot_mode,
+        enable_status=enable_status,
+        error_status=error_status,
+        tool_vector_actual=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        q_actual=(q[0], q[1], q[2], q[3], 0.0, 0.0),
+        seq=1,
+        monotonic_ts=0.0,
+    )
+
+
+class TestProbeStart(unittest.IsolatedAsyncioTestCase):
+    """T7B coupling-probe auto-position verb."""
+
+    def setUp(self):
+        self.config = MagicMock()
+        self.state = MagicMock()
+        self.state.snapshot = _snap()
+        self.monitor = MagicMock()
+        self.dashboard = MagicMock()
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=self.move
+        )
+
+    def _wire_successful_move(self):
+        """JointMovJ side-effect that flips snapshot to "arrived" state."""
+        ack = DashboardResponse(error_id=0, payload="", raw="0,,JointMovJ();")
+        sync_ack = DashboardResponse(error_id=0, payload="", raw="0,,Sync();")
+
+        def joint_mov_j_side(j1, j2, j3, j4):
+            self.state.snapshot = _snap(q=(j1, j2, j3, j4))
+            return ack
+
+        self.move.joint_mov_j.side_effect = joint_mov_j_side
+        self.move.sync.return_value = sync_ack
+
+    async def test_probe_start_happy_path(self):
+        """probe_start 30 → JointMovJ(0, 30, 46, 0) + Sync, post-check passes."""
+        self._wire_successful_move()
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("30")
+        self.move.joint_mov_j.assert_called_once_with(0.0, 30.0, 46.0, 0.0)
+        self.move.sync.assert_called_once()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("moved to J=(0.0, 30.0, 46.0, 0.0)", output)
+        self.assertIn("Ready", output)
+
+    async def test_probe_start_blocked_when_disabled(self):
+        """Pre-check refuses to send when robot is disabled."""
+        self.state.snapshot = _snap(enable_status=0, robot_mode=4)
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("0")
+        self.move.joint_mov_j.assert_not_called()
+        self.move.sync.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("not enabled", output)
+
+    async def test_probe_start_blocked_when_active_error(self):
+        """Pre-check refuses to send when there's an active error.
+
+        Note: snapshot.has_error is ``error_status == 1`` (not != 0) — see
+        robot_state.py:74. The fixture sets error_status=1 to flip has_error.
+        """
+        self.state.snapshot = _snap(error_status=1)
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("0")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("active error", output)
+
+    async def test_probe_start_blocked_when_wrong_mode(self):
+        """Pre-check refuses to send unless mode == 5 (ENABLE)."""
+        self.state.snapshot = _snap(robot_mode=7)  # RUNNING
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("0")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("mode=7", output)
+
+    async def test_probe_start_rejects_j2_out_of_range(self):
+        """probe_start 100 → refused (outside safety.json J2 range)."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("100")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("out of range", output)
+
+    async def test_probe_start_rejects_non_numeric_j2(self):
+        """probe_start abc → refused with parse error."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("abc")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Invalid J2", output)
+
+    async def test_probe_start_requires_argument(self):
+        """probe_start with no J2 prints usage."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Usage:", output)
+
+    async def test_probe_start_skips_sync_on_enqueue_failure(self):
+        """When JointMovJ enqueue ack is non-zero, helper short-circuits Sync."""
+        ack = DashboardResponse(error_id=-1, payload="", raw="-1,,JointMovJ();")
+        self.move.joint_mov_j.return_value = ack
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("0")
+        self.move.joint_mov_j.assert_called_once()
+        self.move.sync.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("enqueue failed", output)
+
+    async def test_probe_start_warns_on_post_move_alarm(self):
+        """If snapshot after sync shows mode != 5, helper warns about alarm."""
+        ack = DashboardResponse(error_id=0, payload="", raw="0,,JointMovJ();")
+        sync_ack = DashboardResponse(error_id=0, payload="", raw="0,,Sync();")
+
+        def joint_mov_j_side(j1, j2, j3, j4):
+            # Simulate controller alarming during the move
+            self.state.snapshot = _snap(
+                robot_mode=9, error_status=42, q=(j1, j2, j3, j4)
+            )
+            return ack
+
+        self.move.joint_mov_j.side_effect = joint_mov_j_side
+        self.move.sync.return_value = sync_ack
+
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_probe_start("0")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("post-move state unexpected", output)
+        self.assertIn("alarmed", output)
+
+    async def test_probe_start_without_move_channel(self):
+        """No 30003 connection → refuse without crashing."""
+        workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=None
+        )
+        with patch("builtins.print") as mp:
+            await workbench.cmd_probe_start("0")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("move channel not connected", output)
+
+
+class TestJog(unittest.IsolatedAsyncioTestCase):
+    """jog <axis> <±deg> — single-joint step verb."""
+
+    def setUp(self):
+        self.config = MagicMock()
+        self.state = MagicMock()
+        # Default: enabled, mode=5, no error, joints at origin
+        self.state.snapshot = _snap()
+        self.monitor = MagicMock()
+        self.dashboard = MagicMock()
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=self.move
+        )
+
+        ack = DashboardResponse(error_id=0, payload="", raw="0,,JointMovJ();")
+        sync_ack = DashboardResponse(error_id=0, payload="", raw="0,,Sync();")
+
+        def joint_mov_j_side(j1, j2, j3, j4):
+            self.state.snapshot = _snap(q=(j1, j2, j3, j4))
+            return ack
+
+        self.move.joint_mov_j.side_effect = joint_mov_j_side
+        self.move.sync.return_value = sync_ack
+
+    async def test_jog_j3_plus_one(self):
+        """jog j3 +1 from (0,0,30,0) → JointMovJ(0, 0, 31, 0)."""
+        self.state.snapshot = _snap(q=(0.0, 0.0, 30.0, 0.0))
+        with patch("builtins.print"):
+            await self.workbench.cmd_jog("j3 +1")
+        self.move.joint_mov_j.assert_called_once_with(0.0, 0.0, 31.0, 0.0)
+        self.move.sync.assert_called_once()
+
+    async def test_jog_j2_minus_five(self):
+        """jog j2 -5 from (0,10,30,0) → JointMovJ(0, 5, 30, 0)."""
+        self.state.snapshot = _snap(q=(0.0, 10.0, 30.0, 0.0))
+        with patch("builtins.print"):
+            await self.workbench.cmd_jog("j2 -5")
+        self.move.joint_mov_j.assert_called_once_with(0.0, 5.0, 30.0, 0.0)
+
+    async def test_jog_axis_is_case_insensitive(self):
+        """jog J3 +1 behaves identically to jog j3 +1."""
+        self.state.snapshot = _snap(q=(0.0, 0.0, 30.0, 0.0))
+        with patch("builtins.print"):
+            await self.workbench.cmd_jog("J3 +1")
+        self.move.joint_mov_j.assert_called_once_with(0.0, 0.0, 31.0, 0.0)
+
+    async def test_jog_fractional_delta(self):
+        """jog accepts fractional degrees (e.g. +0.5)."""
+        self.state.snapshot = _snap(q=(0.0, 0.0, 30.0, 0.0))
+        with patch("builtins.print"):
+            await self.workbench.cmd_jog("j3 +0.5")
+        self.move.joint_mov_j.assert_called_once_with(0.0, 0.0, 30.5, 0.0)
+
+    async def test_jog_missing_delta_prints_usage(self):
+        """jog j3 (no delta) → usage message, no move."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_jog("j3")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Usage:", output)
+
+    async def test_jog_bad_axis_rejected(self):
+        """jog j5 +1 → refused, no move."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_jog("j5 +1")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Invalid axis", output)
+
+    async def test_jog_bad_delta_rejected(self):
+        """jog j3 foo → refused with parse error."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_jog("j3 foo")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Invalid delta", output)
+
+    async def test_jog_out_of_range_rejected(self):
+        """jog j3 +200 from (0,0,60,0) → target 260° outside [-25, 77.3], refused."""
+        self.state.snapshot = _snap(q=(0.0, 0.0, 60.0, 0.0))
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_jog("j3 +200")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("out of range", output)
+
+    async def test_jog_blocked_when_disabled(self):
+        """Pre-check refuses to send when robot is disabled."""
+        self.state.snapshot = _snap(enable_status=0, robot_mode=4)
+        with patch("builtins.print"):
+            await self.workbench.cmd_jog("j3 +1")
+        self.move.joint_mov_j.assert_not_called()
+
+    async def test_jog_blocked_when_active_error(self):
+        """Pre-check refuses to send when there's an active error (post-alarm state).
+
+        snapshot.has_error is ``error_status == 1`` — see robot_state.py:74.
+        """
+        self.state.snapshot = _snap(error_status=1)
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_jog("j3 -1")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("active error", output)
+
+
 if __name__ == "__main__":
     unittest.main()
