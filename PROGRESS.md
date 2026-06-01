@@ -40,7 +40,8 @@ Repo: https://github.com/YCL0209/mg400-workspace
 | **2b 實採 + v1 bounds** | 13 點實採 → calibrate_bounds → safety.json v1 | ✅ | #9 |
 | **3.1 protocol 補完** | ResetRobot/Continue/StartDrag/StopDrag/EmergencyStop/GetErrorID/Sync/GetAngle/GetPose | ✅ | #10 |
 | **3.2 enable 授權** | DobotStudio → 設定 → 遠程設置 → `TCP/二次開發模式`(跨重開機保留) | ✅ | 控制器設定,無程式 |
-| **2b v2 (coupling)** | calibrate_bounds 升級非線性擬合 + 補採 5~8 個 coupling 點 | 未開始 | 要手臂 |
+| **2b v2 algo (T7A)** | calibrate_bounds 升級(piecewise envelope / spec-fallback / z_floor masquerade filter) | ✅ | #12 |
+| **2b v2 polygon (T7B)** | 重採 coupling 點(push-to-alarm 協定)→ 過 deploy gate → 寫進 config | 未開始 | 要手臂 |
 | transport framing fix | `_read_frame` 的 `_pending` 在每次 request 開頭清掉 | ✅ | #9 |
 | 5 motion 原語 | MovJ/MovL 穿過 safety,事件驅動到位(不用 sleep) | 未開始 | 要手臂(且需 3.1 / 3.2 解完) |
 | demo 切片 | `move_to(寫死安全座標)` → 回原位,整條串通驗證 | 未開始 | 要手臂 |
