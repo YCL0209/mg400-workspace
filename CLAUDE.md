@@ -78,6 +78,8 @@ controller / api   對 AI agent、Web、視覺暴露乾淨介面
 - 規格：4 軸，最大伸距 440mm，重複精度 ±0.05mm，額定負載 500g（最大 750g），質心偏心 ≤ 40mm。
 - 關節範圍：J1 ±160°、J2 −25°~85°、J3 −25°~105°、J4 −180°~180°。各軸最大速度 300°/s。
 - 「等動作完成」原廠有兩條路：阻塞式 `Sync()`、或輪詢 `30004` 比對座標。本專案目標走第三條：訂閱 feedback + 事件通知。
+- **三埠握手是 dashboard interface mount 的前置**：client 必須同時連上 29999 + 30003 + 30004，控制器才會把 29999 的 dashboard 指令解析器掛上。只連 29999+30004 → 每條 dashboard 指令回 `-10000`（「指令不存在」），power-cycle 才復原。reference fork 三個 demo 全都開三埠；我們本來只開兩埠就踩了這顆雷。詳見 PROGRESS finding 17。
+- **`;` 規則（送/收不對稱）**：**送**指令給控制器**不加** `;`；**收**到的回應以 `;` 為框終結符。SDK 規範單 `;`，但這支韌體在拒絕狀態會送雙 `;`（`b"-10000,{},;EnableRobot();"`），framer 切兩段：第 2 段是 echo、不是下一筆回應 — `FramedConnection.request()` 在每次 send 前 `_pending.clear()` 已修（PR #9）。詳見 PROGRESS findings 12 + 17。
 
 ---
 

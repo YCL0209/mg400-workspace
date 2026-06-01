@@ -157,18 +157,22 @@ git commit -m "Update PROGRESS.md after Phase 2b v1 hardware session"
 
 **採點協定:從「operator judgment」改成「push 到 controller 真 alarm 才停」。**
 
+**前置(每次 session 開始,都要過才動手)**:
+- 控制器設定為 `TCP/二次開發模式`(finding 11)。
+- workbench 啟動後 log 三條都要看到 "connected":`Dashboard connected at .:29999`、`Move channel connected at .:30003`、`Feedback stream started at .:30004`。少任何一條 → dashboard 指令會全 -10000(finding 17),先排線、重試,不要直接開始採點。
+- 送指令一律**不加** `;`(會被算進 frame terminator,雙 `;` 觸發 framer 切錯);收回應由 transport 框,別自己拼。
+
 **SOP**(workbench 在手臂邊):
-1. DobotStudio 確認模式為 `TCP/二次開發模式`(per finding 11)。
-2. workbench `enable` → `status` 確認 `mode=5 en=Y err=N`、Δ30004 < 0.1mm。
-3. 拖到**中等 z 高度**(避桌面 masquerading)。
-4. **每個 J2 點**(grid 建議 J2 ∈ `{-20, -15, -10, -5, 0, +5, +10, +15, +20, +30, +40}`):
+1. workbench `status` 確認 `mode=5 en=Y err=N`、Δ30004 < 0.1mm。
+2. 拖到**中等 z 高度**(避桌面 masquerading)。
+3. **每個 J2 點**(grid 建議 J2 ∈ `{-20, -15, -10, -5, 0, +5, +10, +15, +20, +30, +40}`):
    - 拖到 (J1=0, J2=該值, J3=安全起點如 30, J4=0)、`status` 確認穩定
    - **1° 步進往上推 J3**(workbench 暫無 jog 指令 — 可用一次性 Python script,或事先在 workbench 加 `jog j3 +1`)
    - 每步後讀 `status`:`mode == 9` 或 `err=Y` → **立刻停**
    - **退回上一個穩定 J3**,`mark coup_j2_<value>`
    - `clear` → `enable`(T6 後 workbench 自己能做)→ 下一點
-5. (可選)J3 下緣:同樣手法往負方向。
-6. `save`。
+4. (可選)J3 下緣:同樣手法往負方向。
+5. `save`。
 
 **Deploy gate(必過才能 PR 寫 config)**:
 ```
