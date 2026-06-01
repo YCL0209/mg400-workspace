@@ -202,14 +202,56 @@ class TestCommandRouting(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Dashboard error", output)
         self.assertIn("Robot mode:", output)
 
+    async def test_continue_calls_dashboard(self):
+        """Continue command routes to DashboardClient.continue_()."""
+        response = DashboardResponse(error_id=0, payload="", raw="0,,Continue();")
+        self.dashboard.continue_.return_value = response
+
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_continue()
+
+        self.dashboard.continue_.assert_called_once()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("Dashboard error", output)
+        self.assertIn("Queue resumed", output)
+
+    async def test_start_drag_calls_dashboard(self):
+        """start_drag command routes to DashboardClient.start_drag()."""
+        response = DashboardResponse(error_id=0, payload="", raw="0,,StartDrag();")
+        self.dashboard.start_drag.return_value = response
+
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_start_drag()
+
+        self.dashboard.start_drag.assert_called_once()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("Dashboard error", output)
+        self.assertIn("Drag mode active", output)
+
+    async def test_stop_drag_calls_dashboard(self):
+        """stop_drag command routes to DashboardClient.stop_drag()."""
+        response = DashboardResponse(error_id=0, payload="", raw="0,,StopDrag();")
+        self.dashboard.stop_drag.return_value = response
+
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_stop_drag()
+
+        self.dashboard.stop_drag.assert_called_once()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertNotIn("Dashboard error", output)
+        self.assertIn("Drag mode exited", output)
+
     async def test_dashboard_not_connected(self):
         """Commands handle missing dashboard gracefully."""
         workbench = Workbench(self.config, self.state, self.monitor, None)
-        
+
         # Should not raise, just print message
         await workbench.cmd_enable()
         await workbench.cmd_disable()
         await workbench.cmd_clear()
+        await workbench.cmd_continue()
+        await workbench.cmd_start_drag()
+        await workbench.cmd_stop_drag()
 
 
 class TestMarkAndSave(unittest.IsolatedAsyncioTestCase):
