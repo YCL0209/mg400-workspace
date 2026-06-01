@@ -206,7 +206,10 @@ class FramedConnection(TcpConnection):
         """Send ``message`` and return the next complete framed reply.
 
         Args:
-            message: Command text *without* the trailing ``;`` terminator.
+            message: Command text. Sent on the wire WITHOUT a trailing ``;``
+                (aligns with the reference demo's send_data, which has driven
+                this controller for years). The controller's *replies* still
+                use ``;`` as a frame terminator — see ``_read_frame``.
             timeout_s: Optional per-request receive timeout, overriding the
                 connection default for slow commands (e.g. ``EnableRobot``,
                 which can take several seconds). Restored afterwards.
@@ -220,7 +223,7 @@ class FramedConnection(TcpConnection):
         # next reply. Left in _pending it would desync every later request.
         self._pending.clear()
         self._rx_buffer = b""
-        self.send(message.encode("utf-8") + self._terminator)
+        self.send(message.encode("utf-8"))
         return self._read_frame(sock, timeout_s)
 
     def _read_frame(self, sock: socket.socket, timeout_s: Optional[float]) -> str:

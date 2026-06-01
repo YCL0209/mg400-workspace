@@ -113,10 +113,12 @@ class FramedConnectionTests(unittest.TestCase):
         conn.connect()
         return conn, sock
 
-    def test_request_sends_command_with_terminator(self):
+    def test_request_sends_command_without_terminator(self):
+        """Wire format aligns with the reference demo's send_data, which never
+        appends ``;`` on send (the terminator is reply-only)."""
         conn, sock = self._framed([b"0,{},EnableRobot();"])
         conn.request("EnableRobot()")
-        self.assertEqual(sock.sent, b"EnableRobot();")
+        self.assertEqual(sock.sent, b"EnableRobot()")
 
     def test_request_returns_single_reply(self):
         conn, _ = self._framed([b"0,{5},RobotMode();"])
