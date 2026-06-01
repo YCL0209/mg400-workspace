@@ -72,7 +72,10 @@ class TestStatusFormatting(unittest.TestCase):
         self.config = MagicMock()
         self.state = MagicMock()
         self.monitor = MagicMock()
-        self.workbench = Workbench(self.config, self.state, self.monitor)
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, move=self.move
+        )
 
     def test_format_status_line(self):
         """Status line contains all required fields."""
@@ -155,7 +158,13 @@ class TestCommandRouting(unittest.IsolatedAsyncioTestCase):
         self.state.snapshot = None
         self.monitor = MagicMock()
         self.dashboard = MagicMock()
-        self.workbench = Workbench(self.config, self.state, self.monitor, self.dashboard)
+        # Move (30003) is held by the workbench just to keep the dashboard
+        # interface mounted — see finding 17. Tests don't exercise it but the
+        # constructor accepts it, so wire a mock for setUp symmetry with prod.
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=self.move
+        )
 
     async def test_enable_calls_dashboard(self):
         """Enable command routes to DashboardClient.enable_robot() when not yet enabled."""
@@ -287,7 +296,10 @@ class TestMarkAndSave(unittest.IsolatedAsyncioTestCase):
         self.config = MagicMock()
         self.state = MagicMock()
         self.monitor = MagicMock()
-        self.workbench = Workbench(self.config, self.state, self.monitor)
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, move=self.move
+        )
 
     async def test_mark_adds_point(self):
         """Mark command captures current snapshot."""
@@ -366,7 +378,10 @@ class TestSingularityQuery(unittest.IsolatedAsyncioTestCase):
         self.config = MagicMock()
         self.state = MagicMock()
         self.monitor = MagicMock()
-        self.workbench = Workbench(self.config, self.state, self.monitor)
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, move=self.move
+        )
 
     async def test_singularity_analysis(self):
         """Singularity query provides distance information."""
