@@ -216,7 +216,7 @@ class Workbench:
             print("Dashboard not connected")
             return
 
-        snap = self.state.snapshot() if self.state is not None else None
+        snap = self.state.snapshot if self.state is not None else None
         if snap is not None and snap.is_enabled:
             print(
                 f"Already enabled (mode={snap.robot_mode} en=Y) — skipping "
