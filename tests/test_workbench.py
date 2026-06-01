@@ -146,12 +146,18 @@ class TestCommandRouting(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.config = MagicMock()
         self.state = MagicMock()
+        # Default: no snapshot available (feedback not yet received). Tests that
+        # want to exercise the is-enabled pre-check in cmd_enable can override
+        # self.state.snapshot.return_value per-test. Without this default the
+        # MagicMock's .is_enabled attribute is itself a truthy MagicMock, which
+        # would make cmd_enable always skip the dashboard call.
+        self.state.snapshot.return_value = None
         self.monitor = MagicMock()
         self.dashboard = MagicMock()
         self.workbench = Workbench(self.config, self.state, self.monitor, self.dashboard)
 
     async def test_enable_calls_dashboard(self):
-        """Enable command routes to DashboardClient.enable_robot()."""
+        """Enable command routes to DashboardClient.enable_robot() when not yet enabled."""
         response = DashboardResponse(error_id=0, payload="", raw="0,,EnableRobot();")
         self.dashboard.enable_robot.return_value = response
 
@@ -162,6 +168,24 @@ class TestCommandRouting(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(str(c) for c in mock_print.call_args_list)
         self.assertNotIn("Dashboard error", output)  # no swallowed AttributeError
         self.assertIn("enabled successfully", output)  # success path ran
+
+    async def test_enable_skips_when_already_enabled(self):
+        """Enable command must NOT re-issue EnableRobot() when controller is
+        already enabled — that triggers the firmware double-enable trap
+        (-10000 + dashboard interface unmounted; PROGRESS finding 16)."""
+        already_enabled_snap = MagicMock()
+        already_enabled_snap.is_enabled = True
+        already_enabled_snap.robot_mode = 5
+        self.state.snapshot.return_value = already_enabled_snap
+
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_enable()
+
+        # The critical assertion: we did NOT touch the dashboard.
+        self.dashboard.enable_robot.assert_not_called()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("Already enabled", output)
+        self.assertIn("finding 16", output)
 
     async def test_disable_calls_dashboard(self):
         """Disable command routes to DashboardClient.disable_robot()."""
