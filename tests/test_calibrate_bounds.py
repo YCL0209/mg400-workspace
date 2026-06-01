@@ -216,6 +216,42 @@ class TestCouplingHelpers(unittest.TestCase):
         ]
         self.assertEqual(fit_piecewise_envelope(coupling), [])
 
+    def test_fit_j2_j3_coupling_e2e_finding13(self):
+        """End-to-end: PROGRESS finding 13's 5 coupling points + a floor point.
+
+        The contaminated J2=+63.9 point must be excluded by the J2-cutoff filter,
+        and the remaining 4 must yield a 2-segment envelope (rising + flat).
+        """
+        points = [
+            # The 5 coupling-labelled points from the v1 capture
+            {"j1": 0, "j2": -14.7, "j3": 44.5, "j4": -106, "label": "coup_j2_-10"},
+            {"j1": 0, "j2":  -7.4, "j3": 50.4, "j4": -106, "label": "coup_j2_0"},
+            {"j1": 0, "j2":  14.1, "j3": 55.3, "j4": -106, "label": "coup_j2_20"},
+            {"j1": 0, "j2":  29.3, "j3": 55.5, "j4": -106, "label": "coup_j2_40"},
+            {"j1": 0, "j2":  63.9, "j3": 35.7, "j4": -106, "label": "coup_j2_70"},  # masquerading
+            # A separately-labelled floor point (so detect_z_floor anchors on it)
+            {"j1": 0, "j2": 82.8, "j3": 77.3, "j4":  81, "label": "floor_0"},
+        ]
+        constraints = fit_j2_j3_coupling(points)
+        # Must produce both rising and flat segments (NOT empty like v1)
+        self.assertEqual(len(constraints), 2)
+        labels = {c.label for c in constraints}
+        self.assertEqual(labels, {"coup_rising", "coup_flat"})
+
+        # Flat cap is min(55.3, 55.5) - 3 margin ≈ 52.3
+        flat = next(c for c in constraints if c.label == "coup_flat")
+        self.assertAlmostEqual(flat.max_value, 52.3, delta=1.0)
+
+        # At J2=0, evaluating both segments — minimum is what gate enforces.
+        # Rising at J2=0 ≈ b - margin. Flat at J2=0 = 52.3. The smaller wins.
+        rising = next(c for c in constraints if c.label == "coup_rising")
+        rising_at_j2_0 = -rising.j2_coeff * 0 + rising.max_value
+        # Effective envelope at J2=0 = min of the two
+        envelope_at_0 = min(rising_at_j2_0, flat.max_value)
+        # Should be close to observed rising peak (~50) minus margin
+        self.assertGreater(envelope_at_0, 40)
+        self.assertLess(envelope_at_0, 60)
+
 
 class TestWorkspaceLimits(unittest.TestCase):
     """Test workspace limit computation via FK."""

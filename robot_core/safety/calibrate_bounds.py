@@ -282,61 +282,32 @@ def fit_piecewise_envelope(
     return constraints
 
 
-def fit_j2_j3_coupling(points: list[dict]) -> list[CouplingConstraint]:
-    """Fit linear half-plane constraints for J2/J3 coupling.
+def fit_j2_j3_coupling(
+    points: list[dict],
+    kinematics_config: Optional[KinematicsConfig] = None,
+    j2_cutoff: float = DEFAULT_J2_CUTOFF_DEG,
+    z_proximity: float = DEFAULT_Z_FLOOR_PROXIMITY_MM,
+) -> list[CouplingConstraint]:
+    """Fit a piecewise (rising → flat) J2/J3 coupling envelope.
 
-    The coupling manifests as reduced J3 range when J2 is extended. We fit
-    constraints of the form: a*J2 + b*J3 <= c
-    
-    For simplicity, we identify key boundary patterns:
-    1. Upper J3 limit decreases with J2 (positive J2 coefficient)
-    2. Lower J3 limit may increase with J2 (negative J2 coefficient)
+    Pipeline: ``select_coupling_points`` (label-based) →
+    ``filter_masquerading_points`` (drops |J2|>cutoff and FK z within proximity
+    of detected z_floor) → ``fit_piecewise_envelope`` (2-segment least-squares).
+    Returns up to two CouplingConstraint objects whose conjunction encodes the
+    real envelope; empty list when the data is too sparse.
     """
-    constraints = []
-    
-    # Filter points that seem to be at J2/J3 limits
-    # (where label suggests coupling or where J2 and J3 are both non-zero and significant)
-    coupling_points = [
-        p for p in points
-        if ("j2" in p.get("label", "").lower() and "j3" in p.get("label", "").lower())
-        or ("coupl" in p.get("label", "").lower())
-        or (abs(p["j2"]) > 30 and abs(p["j3"]) > 30)  # Both joints significantly displaced
-    ]
-    
-    if len(coupling_points) >= 2:
-        # Fit upper constraint (J3 decreases as J2 increases)
-        # Find points that seem to be at upper J3 boundary
-        upper_points = [p for p in coupling_points if p["j3"] > 50]
-        if len(upper_points) >= 2:
-            # Simple linear fit: find the line through extreme points
-            # For upper bound: maximize J2 + J3 weighted
-            j2_max = max(p["j2"] for p in upper_points)
-            j3_at_j2_max = max(p["j3"] for p in upper_points if abs(p["j2"] - j2_max) < 5)
-            
-            j2_min = min(p["j2"] for p in upper_points)
-            j3_at_j2_min = max(p["j3"] for p in upper_points if abs(p["j2"] - j2_min) < 5)
-            
-            if j2_max - j2_min > 10:  # Meaningful range
-                # Fit line: J3 = m*J2 + b, convert to a*J2 + b*J3 <= c
-                # Two points: (j2_min, j3_at_j2_min), (j2_max, j3_at_j2_max)
-                if j3_at_j2_min > j3_at_j2_max:  # J3 decreases with J2
-                    # Approximate the constraint
-                    # We want: J2/j2_range + J3/j3_range <= 1 (normalized)
-                    # Or: J3 <= j3_max - k*(J2 - j2_0)
-                    slope = (j3_at_j2_max - j3_at_j2_min) / (j2_max - j2_min)
-                    # Convert to half-plane: -slope*J2 + J3 <= intercept
-                    intercept = j3_at_j2_min - slope * j2_min
-                    constraints.append(
-                        CouplingConstraint(
-                            j2_coeff=-slope,
-                            j3_coeff=1.0,
-                            max_value=intercept,
-                            label="J3_upper_coupling"
-                        )
-                    )
-    
-    # If no coupling found, return empty list (only per-axis limits apply)
-    return constraints
+    coupling_points = select_coupling_points(points)
+    if not coupling_points:
+        return []
+    z_floor = detect_z_floor(points, kinematics_config=kinematics_config)
+    clean = filter_masquerading_points(
+        coupling_points,
+        z_floor=z_floor,
+        j2_cutoff=j2_cutoff,
+        z_proximity=z_proximity,
+        kinematics_config=kinematics_config,
+    )
+    return fit_piecewise_envelope(clean)
 
 
 def compute_workspace_limits(
