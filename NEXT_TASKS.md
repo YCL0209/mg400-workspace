@@ -133,21 +133,15 @@ git commit -m "Update PROGRESS.md after Phase 2b v1 hardware session"
 
 ## 🟠 P2:要手臂的 session(優先順序內排)
 
-### T6. Phase 3.2 enable 授權 reverse-engineer(~30 分鐘)
+### T6. Phase 3.2 enable 授權 ✅(2026-06-01,無程式改動)
 
-**目的**:讓 workbench `enable` 不要永遠回 -1,workbench 自己能 enable 手臂。
+**結論**:控制器設定 `遠程設置 → TCP/二次開發模式` 是 29999/30003 外部控制的前置開關。不在這模式 → 所有 dashboard 指令一律 -1;切過去後 workbench 自行 enable,**跨控制器電源週期保留**,DobotStudio runtime 不必開。
 
-**步驟**:
+**設定位置**:DobotStudio Pro → 設定 → 遠程設置 → 改 `TCP/二次開發模式`。
 
-1. Windows 機裝 Wireshark + 啟動,filter `tcp.port == 29999 || tcp.port == 30003`
-2. **狀態 1**:控制器剛開機未 enable,workbench 試一次 `enable`(會 -1),抓封包看送了什麼
-3. **狀態 2**:DobotStudio Pro 按 enable 鈕,抓 DobotStudio 跟控制器的所有對話
-4. **差異對比**:DobotStudio 多送了什麼指令?(可能是 `RequestControl()` 之類,SDK doc 沒列)
+過程中順手排除的假設(留給未來省事):29999 換 30003 送 EnableRobot 一樣 -1(授權閘門是整機的,非 per-port);DobotStudio 私有 22000 通道**不是**授權來源(它根本不送 29999),授權純粹是這個模式設定的事。
 
-抓到指令名稱後:
-5. 加 builder + DashboardClient 方法
-6. workbench `enable` 改成「先送授權 → 再送 `EnableRobot(0)`」
-7. 實機驗證一次,確認真的能取代 DobotStudio 那一步
+詳見 PROGRESS finding 11(已解)。
 
 ---
 

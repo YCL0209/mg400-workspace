@@ -37,11 +37,11 @@ Repo: https://github.com/YCL0209/mg400-workspace
 | 4 safety | gate.py + bounds(placeholder)+ 6 條拒絕路徑 | ✅ | #6 |
 | 2b 採集腳本 | probe_limits.py + calibrate_bounds.py(離線) | ✅ | #7 |
 | workbench v1 | scripts 層整合 REPL(status/live/dashboard/sing?/mark) | ✅ | #8 |
-| **2b 實採 + v1 bounds** | 13 點實採 → calibrate_bounds → safety.json v1 | ✅ | #9(待開) |
-| **3.1 protocol 補完** | ResetRobot/Continue/StartDrag/StopDrag/EmergencyStop/GetErrorID/Sync/GetAngle/GetPose | 未開始 | 離線可寫 |
-| **3.2 enable 授權** | reverse-engineer DobotStudio 的 pre-enable 序列(Wireshark) | 未開始 | 要手臂 + 抓封包 |
+| **2b 實採 + v1 bounds** | 13 點實採 → calibrate_bounds → safety.json v1 | ✅ | #9 |
+| **3.1 protocol 補完** | ResetRobot/Continue/StartDrag/StopDrag/EmergencyStop/GetErrorID/Sync/GetAngle/GetPose | ✅ | #10 |
+| **3.2 enable 授權** | DobotStudio → 設定 → 遠程設置 → `TCP/二次開發模式`(跨重開機保留) | ✅ | 控制器設定,無程式 |
 | **2b v2 (coupling)** | calibrate_bounds 升級非線性擬合 + 補採 5~8 個 coupling 點 | 未開始 | 要手臂 |
-| transport framing fix | `_read_frame` 的 `_pending` 在每次 request 開頭清掉 | 未開始 | 離線可寫 |
+| transport framing fix | `_read_frame` 的 `_pending` 在每次 request 開頭清掉 | ✅ | #9 |
 | 5 motion 原語 | MovJ/MovL 穿過 safety,事件驅動到位(不用 sleep) | 未開始 | 要手臂(且需 3.1 / 3.2 解完) |
 | demo 切片 | `move_to(寫死安全座標)` → 回原位,整條串通驗證 | 未開始 | 要手臂 |
 | 6 controller | 狀態機 + 任務佇列 + `move_to(pose)` API + 工具 TCP offset | 未開始 | 要手臂 |
@@ -180,18 +180,19 @@ workbench + DobotStudio 並存正常,port 不會被「佔走」。
 
 ⚠ **規則**:這顆鈕**只能在「已使能」狀態下按**。session 結束前**一定要再按一次跳出**。
 
-### 11. **🚨 dashboard 的 -1 之謎(本次 session 最大發現)**
+### 11. **dashboard 的 -1 之謎(已解,2026-06-01)**
 
-**DobotStudio Pro 必要,目前不能繞**:
-- 我們 `EnableRobot()` 各種 signature 都試過,全部回 `-1,{},`
-- 連 read-only `RobotMode()`、`GetErrorID()`、`PowerOn()` 也回 `-1`
-- 控制器 power cycle 兩次,救不回
+**解答**:控制器有一個「遠程控制模式」設定,**不在這個模式 → 29999/30003 所有外部指令一律 -1**(連 read-only `RobotMode()`/`GetErrorID()`/`PowerOn()` 都拒)。預設不在這模式,所以一台從未被 DobotStudio 設過的控制器,fork-style client(含我們的 workbench)會徹底卡住。
 
-**根本原因(推測)**:DobotStudio 按 enable 時送的不只是 `EnableRobot()`,還有一個**未文件化的「遠端控制授權」指令**。沒這道授權,所有 dashboard 指令都被拒。一旦 DobotStudio 按過 enable,控制器進入「remote authorized」狀態,workbench 接著看 `en=Y` 並能做事。
+**設定位置**:DobotStudio Pro → **設定** → **遠程設置** → 改成 **`TCP/二次開發模式`**。
 
-**目前 workaround**:DobotStudio 開著 → 點 enable → workbench 接手。**Phase 3.2 要 Wireshark 抓 DobotStudio enable 那一刻的 TCP 對話**。
+**持久性**:**跨控制器電源週期保留**(2026-06-01 實機驗證:設定後 power-cycle 控制器、不開 DobotStudio,workbench `EnableRobot()` 仍回 `0,{},EnableRobot()`)。**設一次,永久有效**。
 
-**SDK 錯誤碼表(第 68 頁)印證**:`-1` = 「沒有獲取成功 / 命令接收失敗 / 執行失敗」,**generic 拒絕**——不是 -10000(命令不存在)、不是 -20000(參數錯)、不是 -3xxxx/-4xxxx(類型/範圍錯)。格式都對,純粹是狀態拒絕。
+**對 workbench 的影響(零程式改動)**:設過之後 workbench 自己能 enable;**DobotStudio runtime 不必開、不必按 Enable**。只在首次裝機那一次需要打開 DobotStudio 設這個模式。
+
+**為什麼不是 22000?**(順帶副發現):DobotStudio 自己用的是私有的 **22000** 二進位通道控制手臂,**不走** 29999 公開文字 API(實機 Wireshark 抓包確認,DobotStudio 按 Enable 時 29999 上零封包)。原本以為要抓「DobotStudio 在 29999 多送了什麼授權指令」是空集合 —— 它根本不送 29999。授權就是這個模式設定的事,跟 22000 私有協定無關。
+
+**SDK 錯誤碼表(第 68 頁)印證**:`-1` = 「沒有獲取成功 / 命令接收失敗 / 執行失敗」,**generic 拒絕**——不是 -10000(命令不存在)、不是 -20000(參數錯)、不是 -3xxxx/-4xxxx(類型/範圍錯)。格式都對,純粹是狀態拒絕,正好對應「不在遠程控制模式」的拒絕路徑。
 
 ### 12. **韌體在拒絕狀態下會送兩個 `;` 的非標準回應**
 
@@ -334,10 +335,13 @@ floor_0           J=(  -1.7, +82.8, +77.3,  +81.2)   ρ≈320, z≈-197mm
 
 ## 跟手臂工作的 SOP
 
+> **首次裝機(一次性,5 秒)**:DobotStudio Pro → **設定** → **遠程設置** → 改成 **`TCP/二次開發模式`**。
+> 此設定**跨控制器電源週期保留**,設過一次就永久有效。後續 session 全程**不需要打開 DobotStudio**(詳見 finding 11)。
+
 **啟動序列**(每次接手臂必做):
 1. 控制器電源開啟,等 LED 穩定(30~60 秒)
-2. **DobotStudio Pro 開,按 Enable**(綠燈、J1234 全使能)。**這步不能省**,workbench enable 目前無效
-3. 終端機跑 `python -m robot_core.scripts.workbench`
+2. 終端機跑 `python -m robot_core.scripts.workbench`
+3. `mg400>` 打 `enable`(綠燈、J1234 全使能)
 4. **`status`,確認 Δ30004 < 0.1mm**——go/no-go 訊號
 
 **進入拖曳示教**(採點 / 教學):
@@ -350,7 +354,7 @@ floor_0           J=(  -1.7, +82.8, +77.3,  +81.2)   ρ≈320, z≈-197mm
 
 **越界恢復**(會發生很多次):
 9. 鬆開示教手
-10. **回 DobotStudio**:點 ClearError → 點 Enable(若退使能)
+10. workbench `clear` → `enable`(若退使能)
 11. workbench `status` 確認 `en=Y err=N`
 12. 物理按 unlock 鈕重新進拖曳
 13. 繼續
@@ -358,7 +362,7 @@ floor_0           J=(  -1.7, +82.8, +77.3,  +81.2)   ρ≈320, z≈-197mm
 **收尾**(順序很重要):
 14. workbench `save` 確保所有點存檔
 15. 物理上**再按一次 unlock 鈕**跳出拖曳模式(漏了下次會莫名 -1)
-16. DobotStudio 點 Disable
+16. workbench `disable`(退使能)
 17. workbench `q`
 
 ⚠ **絕對禁止**:

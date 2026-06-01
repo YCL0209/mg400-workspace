@@ -136,9 +136,8 @@ def continue_() -> str:
     """Resume a paused move queue.
 
     Pairs with ``Pause()`` and is the required follow-up to ``ClearError()`` when
-    recovering the queue after an alarm. String per the SDK PDF (controller
-    1.7.0.0): ``Continue()``. The reference Python fork sends lowercase
-    ``continue()`` — treated as fork staleness; confirm on hardware in Phase 5.
+    recovering the queue after an alarm. (MG400 command names are case-insensitive
+    on the wire — capitalization here is purely for readability.)
     """
     return "Continue()"
 
