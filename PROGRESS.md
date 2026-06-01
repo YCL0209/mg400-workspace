@@ -238,6 +238,32 @@ z_min_effective = z_floor_flange + tool.z_offset_mm
 ```
 **不用每換治具就重採整套工作範圍**——這是 Phase 6 controller 的 TCP/Tool 架構要扛的事。
 
+### 16. **🚨 `EnableRobot()` 不是 idempotent,雙 enable 把 dashboard 整段卸載(2026-06-01 實機驗證)**
+
+**現象**(workbench 連續兩次 `enable`,reproducible):
+```
+mg400> enable
+Received: 0,{},EnableRobot()         ← 1st call,成功使能
+mg400> enable
+Received: -10000,{},                  ← 2nd call,失敗
+mg400> mode
+Received: -10000,{},                  ← 連 read-only RobotMode 也拒
+mg400> status
+[mode=5 en=Y err=N] ...               ← feedback 30004 仍正常
+```
+
+**機制**:對已使能(`en=Y`)的控制器再 call `EnableRobot()` → 韌體回 `-10000` 並**把整個 dashboard 接收器卸載**;所有後續 dashboard 指令(query、set、控制全部)都 `-10000`。Feedback 30004 不受影響,所以從 `status` 看 controller state machine 還活著,只是 29999 dashboard interface 被踢掉。
+
+**注意 `-10000` 是被韌體過載使用**:PDF p68 寫 `-10000 = 命令不存在`,但實際上韌體也用它表達「指令存在但當前狀態拒絕」(此案就是已使能 + 又 enable)。所以看到 -10000 不代表指令真的不存在,要交叉比對。
+
+**復原**:dashboard 死透,沒有 TCP 端的救法(PDF 整本 11 + 12 + 9 + 8 + ... 個指令全部掃過,沒有 reset session 之類)。只能:
+- DobotStudio Pro 按 Disable → Enable(走它的 22000 私有通道,可能踢回 dashboard mode)
+- 失敗就 **power-cycle 控制器**
+
+**修法(已 commit)**:`workbench.cmd_enable()` 加 pre-check:先讀 feedback snapshot,若 `is_enabled` 為 True 就 short-circuit 不送指令,印「Already enabled — skipping」。任何呼叫 `EnableRobot()` 的程式碼都要遵守這條,否則一次無心多叫就會把 controller 搞死。
+
+**對舊認知的修正**:這次 session 早先以為「物理 unlock 進/退觸發全拒絕」(寫進這份 plan 的執行進度),其實**很可能**真正的觸發是某個地方多叫了一次 EnableRobot,而非 unlock 本身。前一次 Phase 2b 13 點採集 unlock 用了很多次都沒事,反證 unlock alone 不是元兇。需要日後做一次受控實驗(只按 unlock 不下任何 dashboard 指令)才能洗清 unlock 的嫌疑。
+
 ---
 
 ## FK 校驗資料(10 筆真實配對,法蘭中心,mm/deg)

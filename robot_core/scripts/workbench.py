@@ -204,11 +204,26 @@ class Workbench:
         print()  # New line after live mode
 
     async def cmd_enable(self):
-        """Enable robot via dashboard."""
+        """Enable robot via dashboard.
+
+        Pre-checks feedback state: if the controller is already enabled, skips
+        sending EnableRobot() because re-issuing it on this firmware (MG400
+        1.7.0.0) returns -10000 AND unmounts the dashboard interface — every
+        subsequent dashboard command then also returns -10000, recoverable only
+        by power-cycle or DobotStudio Disable+Enable. See PROGRESS finding 16.
+        """
         if not self.dashboard:
             print("Dashboard not connected")
             return
-        
+
+        snap = self.state.snapshot() if self.state is not None else None
+        if snap is not None and snap.is_enabled:
+            print(
+                f"Already enabled (mode={snap.robot_mode} en=Y) — skipping "
+                "EnableRobot() to avoid the double-enable -10000 trap (finding 16)"
+            )
+            return
+
         print("Sending: EnableRobot()")
         try:
             response = self.dashboard.enable_robot()
