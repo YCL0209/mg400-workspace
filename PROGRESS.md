@@ -238,7 +238,7 @@ z_min_effective = z_floor_flange + tool.z_offset_mm
 ```
 **不用每換治具就重採整套工作範圍**——這是 Phase 6 controller 的 TCP/Tool 架構要扛的事。
 
-### 16. **🚨 `EnableRobot()` 不是 idempotent,雙 enable 把 dashboard 整段卸載(2026-06-01 實機驗證)**
+### 16. **🚨 `EnableRobot()` 不是 idempotent,雙 enable 把 dashboard 整段卸載(2026-06-01 實機驗證)** ⚠ [待重新調查 — 見 finding 17]
 
 **現象**(workbench 連續兩次 `enable`,reproducible):
 ```
@@ -263,6 +263,32 @@ mg400> status
 **修法(已 commit)**:`workbench.cmd_enable()` 加 pre-check:先讀 feedback snapshot,若 `is_enabled` 為 True 就 short-circuit 不送指令,印「Already enabled — skipping」。任何呼叫 `EnableRobot()` 的程式碼都要遵守這條,否則一次無心多叫就會把 controller 搞死。
 
 **對舊認知的修正**:這次 session 早先以為「物理 unlock 進/退觸發全拒絕」(寫進這份 plan 的執行進度),其實**很可能**真正的觸發是某個地方多叫了一次 EnableRobot,而非 unlock 本身。前一次 Phase 2b 13 點採集 unlock 用了很多次都沒事,反證 unlock alone 不是元兇。需要日後做一次受控實驗(只按 unlock 不下任何 dashboard 指令)才能洗清 unlock 的嫌疑。
+
+**2026-06-01 後續修正(finding 17 出現後)**:再評估這條 finding。用戶觀察到 reference fork 的 demo software 連續按 enable 都沒事 + 不需 pre-check,跟這條 finding 的「雙 enable 必死」相矛盾。後續實機證據(finding 17)指向**真正的觸發是 workbench 漏開 30003 → dashboard interface 沒掛載**,而不是雙 enable。pre-check 暫保留無害,但「雙 enable 必死」的因果鏈待 finding 17 修法上線後重新驗證:
+- 若 workbench 修成三 port 後,連續兩次 enable 不再 -10000 → finding 16 假設**錯**,真正觸發是 3-port 缺
+- 若仍會 -10000(但只限第二次)→ finding 16 真的存在,跟 finding 17 是兩條獨立 trap
+
+### 17. **🚨 dashboard interface mount 要求三 port 全連,缺 30003 就全 -10000(2026-06-01 實機驗證)**
+
+過去誤判為 finding 16 的隨機 -10000、需 power-cycle 才復原,真正元兇是 workbench 連線模型錯:**只開了 29999(dashboard)+ 30004(feedback),沒開 30003(move)**。控制器要求 client 連完三個埠才把 dashboard 指令解析器掛載;少一個 → 所有 dashboard 指令當「命令不存在」拒掉,回 -10000。
+
+**實機證據**(兩支 ad-hoc raw-socket 對照):
+```python
+# outputs/test_dashboard_only_idle.py — 只開 29999
+sock.connect((ip, 29999)); time.sleep(1); sock.sendall(b"RobotMode();")
+# Reply: b'-10000,{},;RobotMode();'        ❌
+
+# outputs/test_three_socket.py — 連 29999 + 30003 + 30004
+dash.connect(29999); move.connect(30003); feed.connect(30004); time.sleep(1)
+dash.sendall(b"RobotMode();")
+# Reply: b'0,{4},RobotMode();'              ✓
+```
+
+**為什麼以前沒看到**:reference fork 的 `ui.py` / `PythonExample.py` / `main.py` 三個 demo 一開始就連三個埠,所以 demo 跑得通 → 我們以為「dashboard 直接送指令就行」。workbench v1 設計時把 30003 留到「之後做 motion 才開」→ 撞上這條沒文件化的握手要求。
+
+**修法(commit `7bc1aa7`)**:`workbench.main_async` 啟動時也建立一條 `FramedConnection(move_port)` 包成 `MoveClient`,純粹維持 socket 開著,不送任何 motion 指令。`Workbench.__init__` 加可選 `move` 參數承接。連線失敗 log warning + 繼續(避免 workbench 起不來),但 dashboard 可能仍 -10000(這時就要看 log 找 move 連線到底成不成)。
+
+**注意**:這不一定否定 finding 16(雙 enable trap)。可能兩條都存在(獨立 trap),也可能只有 17 是真的、16 的 -10000 從頭到尾都是 3-port 缺造成的。修完上手臂驗證後回頭改寫 finding 16。
 
 ---
 

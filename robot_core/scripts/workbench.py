@@ -45,7 +45,7 @@ from typing import Optional
 
 from robot_core.config import RobotConfig
 from robot_core.kinematics import forward_kinematics
-from robot_core.protocol import DashboardClient
+from robot_core.protocol import DashboardClient, MoveClient
 from robot_core.safety.bounds import SafetyBounds, default_bounds
 from robot_core.state import RobotState, RobotStateMonitor, RobotStateSnapshot
 from robot_core.transport import AsyncFeedbackStream, FramedConnection
@@ -100,11 +100,18 @@ class Workbench:
         state: RobotState,
         monitor: RobotStateMonitor,
         dashboard: Optional[DashboardClient] = None,
+        move: Optional[MoveClient] = None,
     ):
         self.config = config
         self.state = state
         self.monitor = monitor
         self.dashboard = dashboard
+        # Held only to keep the move socket (30003) open: this firmware refuses
+        # every dashboard command with -10000 unless the client has all three
+        # ports (29999/30003/30004) connected — the controller only "mounts"
+        # the dashboard interface after the full three-port handshake. See
+        # PROGRESS finding 17.
+        self.move = move
         self.bounds = default_bounds()
         self.marked_points: list[LimitPoint] = []
         self.running = True
@@ -531,23 +538,45 @@ async def main_async(config: RobotConfig):
         logger.info(f"Dashboard connected at {config.ip}:{config.dashboard_port}")
     except Exception as e:
         logger.warning(f"Dashboard connection failed (control commands unavailable): {e}")
-    
+
+    # Open the move (30003) socket too. We don't send motion from the workbench,
+    # but the controller only mounts the dashboard interface after the client
+    # opens all three ports (29999/30003/30004) — see PROGRESS finding 17 and
+    # the reference fork's ui.py/PythonExample.py/main.py, which all open three.
+    move = None
+    move_conn = None
+    try:
+        move_conn = FramedConnection(
+            config.ip,
+            config.move_port,
+            connect_timeout_s=config.transport.connect_timeout_s,
+        )
+        move_conn.connect()
+        move = MoveClient(move_conn)
+        logger.info(f"Move channel connected at {config.ip}:{config.move_port}")
+    except Exception as e:
+        logger.warning(
+            f"Move connection failed (dashboard may return -10000 — finding 17): {e}"
+        )
+
     # Create workbench
-    workbench = Workbench(config, state, monitor, dashboard)
-    
+    workbench = Workbench(config, state, monitor, dashboard, move)
+
     try:
         # Start monitoring
         monitor.start()
         logger.info(f"Feedback stream started at {config.ip}:{config.feedback_port}")
-        
+
         # Run REPL
         await workbench.run_repl()
-        
+
     finally:
         # Clean shutdown
         await monitor.stop()
         if dashboard_conn:
             dashboard_conn.close()
+        if move_conn:
+            move_conn.close()
         
         # Print stats
         print("\n=== Session Statistics ===")
