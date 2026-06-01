@@ -127,10 +127,14 @@ class GateApprovalTests(unittest.TestCase):
         for got, want in zip(decision.chosen_joints, joints):
             self.assertAlmostEqual(got, want, delta=1e-6)
 
-    def test_approved_under_default_placeholder_bounds(self):
-        # Exercises default_bounds() / config/safety.json loading with a safe pose.
-        target = forward_kinematics(0, 0, 60, 0)
-        decision = evaluate_move(target, _snapshot(joints=(0, 0, 60, 0)))
+    def test_approved_under_default_bounds(self):
+        # Exercises default_bounds() / config/safety.json loading with a known-safe
+        # pose. Uses the actual factory pose from PROGRESS finding 4 / calibration
+        # pair A1 (J=(-0.007, -0.021, 59.903, 2.681)) — NOT a rounded (0,0,60,0)
+        # which sits exactly on the J3-J2=60 coupling boundary deployed by T7B.
+        factory_joints = (-0.007, -0.021, 59.903, 2.681)
+        target = forward_kinematics(*factory_joints)
+        decision = evaluate_move(target, _snapshot(joints=factory_joints))
         self.assertTrue(decision.approved, decision.reason)
         self.assertIsNotNone(default_bounds())
 
