@@ -394,8 +394,9 @@ floor_0           J=(  -1.7, +82.8, +77.3,  +81.2)   ρ≈320, z≈-197mm
 **啟動序列**(每次接手臂必做):
 1. 控制器電源開啟,等 LED 穩定(30~60 秒)
 2. 終端機跑 `python -m robot_core.scripts.workbench`
-3. `mg400>` 打 `enable`(綠燈、J1234 全使能)
-4. **`status`,確認 Δ30004 < 0.1mm**——go/no-go 訊號
+3. **檢視 log 三條 connected**:`Dashboard connected at .:29999`、`Move channel connected at .:30003`、`Feedback stream started at .:30004`。缺任何一條 → dashboard 會全 -10000(finding 17),先排線重試
+4. `mg400>` 打 `enable`(綠燈、J1234 全使能)
+5. **`status`,確認 Δ30004 < 0.1mm**——go/no-go 訊號
 
 **進入拖曳示教**(採點 / 教學):
 5. 物理按 unlock 鈕一次(B 型 latch,卡住「拖曳模式」位置)
