@@ -16,6 +16,8 @@ venv/
 outputs/
 # ...except raw limit-probe captures, which are calibration truth, not intermediates
 !outputs/limits_*.json
+# ...and one-off diagnostic scripts written during arm sessions (test_*.py pattern)
+!outputs/test_*.py
 
 # macOS
 .DS_Store
