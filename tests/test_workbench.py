@@ -146,12 +146,13 @@ class TestCommandRouting(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.config = MagicMock()
         self.state = MagicMock()
-        # Default: no snapshot available (feedback not yet received). Tests that
-        # want to exercise the is-enabled pre-check in cmd_enable can override
-        # self.state.snapshot.return_value per-test. Without this default the
-        # MagicMock's .is_enabled attribute is itself a truthy MagicMock, which
-        # would make cmd_enable always skip the dashboard call.
-        self.state.snapshot.return_value = None
+        # state.snapshot is a PROPERTY on the real RobotState (not a method) —
+        # assign as an attribute, not as .return_value, so mocked access mirrors
+        # production (otherwise MagicMock auto-creates a callable child and we'd
+        # silently pass tests that would crash on the real object — that's how
+        # the original cmd_enable fix shipped a TypeError to hardware).
+        # Default to None = "feedback not yet received"; specific tests override.
+        self.state.snapshot = None
         self.monitor = MagicMock()
         self.dashboard = MagicMock()
         self.workbench = Workbench(self.config, self.state, self.monitor, self.dashboard)
@@ -176,7 +177,8 @@ class TestCommandRouting(unittest.IsolatedAsyncioTestCase):
         already_enabled_snap = MagicMock()
         already_enabled_snap.is_enabled = True
         already_enabled_snap.robot_mode = 5
-        self.state.snapshot.return_value = already_enabled_snap
+        # .snapshot is a property on real RobotState; assign as attribute.
+        self.state.snapshot = already_enabled_snap
 
         with patch("builtins.print") as mock_print:
             await self.workbench.cmd_enable()
