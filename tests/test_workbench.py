@@ -734,5 +734,77 @@ class TestJog(unittest.IsolatedAsyncioTestCase):
         self.assertIn("active error", output)
 
 
+class TestSpeed(unittest.IsolatedAsyncioTestCase):
+    """speed <percent> — global SpeedFactor verb."""
+
+    def setUp(self):
+        self.config = MagicMock()
+        self.state = MagicMock()
+        self.state.snapshot = _snap()
+        self.monitor = MagicMock()
+        self.dashboard = MagicMock()
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=self.move
+        )
+
+    async def test_speed_happy_path(self):
+        """speed 20 → DashboardClient.speed_factor(20) called once."""
+        response = DashboardResponse(error_id=0, payload="", raw="0,,SpeedFactor(20);")
+        self.dashboard.speed_factor.return_value = response
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_speed("20")
+        self.dashboard.speed_factor.assert_called_once_with(20)
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Global speed set to 20%", output)
+
+    async def test_speed_rejects_out_of_range(self):
+        """speed 200 → refused, no dashboard call."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_speed("200")
+        self.dashboard.speed_factor.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("out of range", output)
+
+    async def test_speed_rejects_zero(self):
+        """speed 0 → refused (range is 1-100)."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_speed("0")
+        self.dashboard.speed_factor.assert_not_called()
+
+    async def test_speed_rejects_non_numeric(self):
+        """speed abc → parse error, no dashboard call."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_speed("abc")
+        self.dashboard.speed_factor.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Invalid percent", output)
+
+    async def test_speed_no_args_prints_usage(self):
+        """speed (no args) → usage message."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_speed("")
+        self.dashboard.speed_factor.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Usage:", output)
+
+    async def test_speed_handles_dashboard_error_response(self):
+        """Non-zero error_id from controller is reported, doesn't crash."""
+        response = DashboardResponse(error_id=-1, payload="", raw="-1,,SpeedFactor(50);")
+        self.dashboard.speed_factor.return_value = response
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_speed("50")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("SpeedFactor failed", output)
+
+    async def test_speed_without_dashboard(self):
+        """No dashboard connection → refuse gracefully."""
+        workbench = Workbench(self.config, self.state, self.monitor, None, move=self.move)
+        with patch("builtins.print") as mp:
+            await workbench.cmd_speed("20")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Dashboard not connected", output)
+
+
 if __name__ == "__main__":
     unittest.main()

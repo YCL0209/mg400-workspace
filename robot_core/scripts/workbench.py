@@ -22,6 +22,7 @@ Commands at mg400> prompt:
     enable            - Enable robot via dashboard
     disable           - Disable robot via dashboard
     clear             - Clear errors via dashboard
+    speed <percent>   - Set global speed factor (1-100%)
     continue          - Resume queue (after ClearError)
     start_drag        - Enter software drag/teach mode
     stop_drag         - Leave software drag/teach mode
@@ -67,6 +68,16 @@ PROMPT = "mg400> "
 PROBE_START_J3 = 46.0
 PROBE_SYNC_TIMEOUT_S = 30.0
 ROBOT_MODE_ENABLE = 5
+
+# Snapshot settle: MoveClient.sync() returns once the controller's queue drains,
+# but the async feedback task may not yet have processed the post-motion frame
+# — reading state.snapshot immediately can return pre-motion joints, and any
+# follow-up command (e.g. jog) that derives its target from "current" joints
+# would compute against stale values. Poll until feedback catches up to the
+# JointMovJ target (~one feedback frame at 8ms cadence) before declaring done.
+SNAPSHOT_SETTLE_TOL_DEG = 0.5
+SNAPSHOT_SETTLE_TIMEOUT_S = 2.0
+SNAPSHOT_POLL_INTERVAL_S = 0.02
 
 
 @dataclass
@@ -287,6 +298,37 @@ class Workbench:
         except Exception as e:
             print(f"Dashboard error: {e}")
 
+    async def cmd_speed(self, args: str):
+        """Set global motion speed factor (1-100%, applies to all subsequent moves).
+
+        Persists until DisableRobot / power-cycle. T7B採點建議全程低速（20%~30%）。
+        """
+        if not self.dashboard:
+            print("Dashboard not connected")
+            return
+        if not args.strip():
+            print("Usage: speed <percent>  (1-100)")
+            return
+        try:
+            percent = int(args.strip())
+        except ValueError:
+            print(f"Invalid percent: {args!r} — expected integer 1-100")
+            return
+        if not (1 <= percent <= 100):
+            print(f"Percent {percent} out of range [1, 100] — refusing")
+            return
+
+        print(f"Sending: SpeedFactor({percent})")
+        try:
+            response = self.dashboard.speed_factor(percent)
+            print(f"Received: {response.raw}")
+            if response.error_id == 0:
+                print(f"Global speed set to {percent}%")
+            else:
+                print(f"SpeedFactor failed: error {response.error_id}")
+        except Exception as e:
+            print(f"Dashboard error: {e}")
+
     async def cmd_continue(self):
         """Resume the move queue via dashboard (the recovery step after ClearError)."""
         if not self.dashboard:
@@ -386,6 +428,23 @@ class Workbench:
             print(f"{op_desc}: move error: {e}")
             return False
 
+        # Wait for feedback to catch up to the move's target before reading the
+        # post snapshot. If we don't, state.snapshot still reflects the pre-move
+        # frame and the printed joints (plus any follow-up command's "current
+        # position") would be wrong — see plan hotfix-2.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + SNAPSHOT_SETTLE_TIMEOUT_S
+        converged = False
+        while loop.time() < deadline:
+            post = self.state.snapshot
+            if post is not None and all(
+                abs(actual - want) < SNAPSHOT_SETTLE_TOL_DEG
+                for actual, want in zip(post.joints, target)
+            ):
+                converged = True
+                break
+            await asyncio.sleep(SNAPSHOT_POLL_INTERVAL_S)
+
         post = self.state.snapshot
         if post is None:
             print(f"{op_desc}: lost feedback after move — please check status manually")
@@ -397,6 +456,11 @@ class Workbench:
             )
             return False
         j1a, j2a, j3a, j4a = post.joints
+        if not converged:
+            print(
+                f"⚠ {op_desc}: snapshot did not converge to target within "
+                f"{SNAPSHOT_SETTLE_TIMEOUT_S}s — readback may be stale"
+            )
         print(f"{op_desc}: moved to J=({j1a:.1f}, {j2a:.1f}, {j3a:.1f}, {j4a:.1f})")
         return True
 
@@ -608,6 +672,7 @@ class Workbench:
                     print("  enable       - Enable robot")
                     print("  disable      - Disable robot")
                     print("  clear        - Clear errors")
+                    print("  speed <pct>  - Set global speed factor 1-100% (T7B: try 20)")
                     print("  continue     - Resume queue (after ClearError)")
                     print("  start_drag   - Enter drag/teach mode (replaces unlock button)")
                     print("  stop_drag    - Leave drag/teach mode")
@@ -629,6 +694,8 @@ class Workbench:
                     await self.cmd_disable()
                 elif cmd == "clear":
                     await self.cmd_clear()
+                elif cmd == "speed":
+                    await self.cmd_speed(args)
                 elif cmd == "continue":
                     await self.cmd_continue()
                 elif cmd == "start_drag":
