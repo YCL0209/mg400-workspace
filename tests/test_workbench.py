@@ -596,14 +596,15 @@ class TestProbeStart(unittest.IsolatedAsyncioTestCase):
         self.assertIn("enqueue failed", output)
 
     async def test_probe_start_warns_on_post_move_alarm(self):
-        """If snapshot after sync shows mode != 5, helper warns about alarm."""
+        """If snapshot after sync shows mode==9 (ERROR), helper reports alarm."""
         ack = DashboardResponse(error_id=0, payload="", raw="0,,JointMovJ();")
         sync_ack = DashboardResponse(error_id=0, payload="", raw="0,,Sync();")
 
         def joint_mov_j_side(j1, j2, j3, j4):
-            # Simulate controller alarming during the move
+            # Simulate controller alarming during the move: mode 9 ERROR.
+            # error_status=1 also flips has_error (has_error is ==1, not !=0).
             self.state.snapshot = _snap(
-                robot_mode=9, error_status=42, q=(j1, j2, j3, j4)
+                robot_mode=9, error_status=1, q=(j1, j2, j3, j4)
             )
             return ack
 
@@ -613,8 +614,8 @@ class TestProbeStart(unittest.IsolatedAsyncioTestCase):
         with patch("builtins.print") as mp:
             await self.workbench.cmd_probe_start("0")
         output = "\n".join(str(c) for c in mp.call_args_list)
-        self.assertIn("post-move state unexpected", output)
-        self.assertIn("alarmed", output)
+        self.assertIn("controller alarmed", output)
+        self.assertIn("mode=9", output)
 
     async def test_probe_start_without_move_channel(self):
         """No 30003 connection → refuse without crashing."""

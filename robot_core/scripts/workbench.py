@@ -68,6 +68,8 @@ PROMPT = "mg400> "
 PROBE_START_J3 = 46.0
 PROBE_SYNC_TIMEOUT_S = 30.0
 ROBOT_MODE_ENABLE = 5
+ROBOT_MODE_RUNNING = 7
+ROBOT_MODE_ERROR = 9
 
 # Snapshot settle: MoveClient.sync() returns once the controller's queue drains,
 # but the async feedback task may not yet have processed the post-motion frame
@@ -428,38 +430,46 @@ class Workbench:
             print(f"{op_desc}: move error: {e}")
             return False
 
-        # Wait for feedback to catch up to the move's target before reading the
-        # post snapshot. If we don't, state.snapshot still reflects the pre-move
-        # frame and the printed joints (plus any follow-up command's "current
-        # position") would be wrong — see plan hotfix-2.
+        # Wait for feedback to catch up: BOTH joints close to target AND mode
+        # back to ENABLE. Sync() returns when the controller's queue drains
+        # but the firmware may still be transitioning mode 7 RUNNING → 5
+        # ENABLE for a few feedback frames. If we read snapshot during that
+        # window and only checked joints, we'd see "joints at target, mode=7"
+        # and misreport it as an alarm. Bail early on real alarm (mode=9 /
+        # has_error) so the operator sees that quickly.
         loop = asyncio.get_event_loop()
         deadline = loop.time() + SNAPSHOT_SETTLE_TIMEOUT_S
         converged = False
         while loop.time() < deadline:
             post = self.state.snapshot
-            if post is not None and all(
-                abs(actual - want) < SNAPSHOT_SETTLE_TOL_DEG
-                for actual, want in zip(post.joints, target)
-            ):
-                converged = True
-                break
+            if post is not None:
+                if post.has_error or post.robot_mode == ROBOT_MODE_ERROR:
+                    break
+                joints_close = all(
+                    abs(actual - want) < SNAPSHOT_SETTLE_TOL_DEG
+                    for actual, want in zip(post.joints, target)
+                )
+                if joints_close and post.robot_mode == ROBOT_MODE_ENABLE:
+                    converged = True
+                    break
             await asyncio.sleep(SNAPSHOT_POLL_INTERVAL_S)
 
         post = self.state.snapshot
         if post is None:
             print(f"{op_desc}: lost feedback after move — please check status manually")
             return False
-        if post.has_error or post.robot_mode != ROBOT_MODE_ENABLE:
+        if post.has_error or post.robot_mode == ROBOT_MODE_ERROR:
             print(
-                f"⚠ {op_desc}: post-move state unexpected — mode={post.robot_mode}, "
-                f"err={post.has_error} — controller likely alarmed"
+                f"⚠ {op_desc}: controller alarmed — mode={post.robot_mode}, "
+                f"err={post.has_error}"
             )
             return False
         j1a, j2a, j3a, j4a = post.joints
         if not converged:
             print(
-                f"⚠ {op_desc}: snapshot did not converge to target within "
-                f"{SNAPSHOT_SETTLE_TIMEOUT_S}s — readback may be stale"
+                f"⚠ {op_desc}: motion did not settle to ENABLE within "
+                f"{SNAPSHOT_SETTLE_TIMEOUT_S}s (mode={post.robot_mode}) — "
+                f"readback may not yet reflect final position"
             )
         print(f"{op_desc}: moved to J=({j1a:.1f}, {j2a:.1f}, {j3a:.1f}, {j4a:.1f})")
         return True
