@@ -242,7 +242,7 @@ class Workbench:
         if not self.dashboard:
             print("Dashboard not connected")
             return
-        
+
         print("Sending: ClearError()")
         try:
             response = self.dashboard.clear_error()
@@ -251,6 +251,57 @@ class Workbench:
                 print("Errors cleared successfully")
             else:
                 print(f"Clear failed: error {response.error_id}")
+        except Exception as e:
+            print(f"Dashboard error: {e}")
+
+    async def cmd_continue(self):
+        """Resume the move queue via dashboard (the recovery step after ClearError)."""
+        if not self.dashboard:
+            print("Dashboard not connected")
+            return
+
+        print("Sending: Continue()")
+        try:
+            response = self.dashboard.continue_()
+            print(f"Received: {response.raw}")
+            if response.error_id == 0:
+                print("Queue resumed")
+            else:
+                print(f"Continue failed: error {response.error_id}")
+        except Exception as e:
+            print(f"Dashboard error: {e}")
+
+    async def cmd_start_drag(self):
+        """Enter software drag/teach mode (gravity comp) — programmatic unlock-button."""
+        if not self.dashboard:
+            print("Dashboard not connected")
+            return
+
+        print("Sending: StartDrag()")
+        try:
+            response = self.dashboard.start_drag()
+            print(f"Received: {response.raw}")
+            if response.error_id == 0:
+                print("Drag mode active — arm is now free to push by hand")
+            else:
+                print(f"StartDrag failed: error {response.error_id} (must be enabled first)")
+        except Exception as e:
+            print(f"Dashboard error: {e}")
+
+    async def cmd_stop_drag(self):
+        """Leave software drag/teach mode."""
+        if not self.dashboard:
+            print("Dashboard not connected")
+            return
+
+        print("Sending: StopDrag()")
+        try:
+            response = self.dashboard.stop_drag()
+            print(f"Received: {response.raw}")
+            if response.error_id == 0:
+                print("Drag mode exited")
+            else:
+                print(f"StopDrag failed: error {response.error_id}")
         except Exception as e:
             print(f"Dashboard error: {e}")
 
@@ -387,17 +438,20 @@ class Workbench:
                     break
                 elif cmd == "help":
                     print("Commands:")
-                    print("  status      - Show current state")
-                    print("  live        - Live update mode")
-                    print("  enable      - Enable robot")
-                    print("  disable     - Disable robot")
-                    print("  clear       - Clear errors")
-                    print("  mode        - Query robot mode")
-                    print("  version     - Query version")
-                    print("  sing?       - Singularity analysis")
-                    print("  mark <label>- Mark limit point")
-                    print("  save        - Save marked points")
-                    print("  q           - Quit")
+                    print("  status       - Show current state")
+                    print("  live         - Live update mode")
+                    print("  enable       - Enable robot")
+                    print("  disable      - Disable robot")
+                    print("  clear        - Clear errors")
+                    print("  continue     - Resume queue (after ClearError)")
+                    print("  start_drag   - Enter drag/teach mode (replaces unlock button)")
+                    print("  stop_drag    - Leave drag/teach mode")
+                    print("  mode         - Query robot mode")
+                    print("  version      - Query version")
+                    print("  sing?        - Singularity analysis")
+                    print("  mark <label> - Mark limit point")
+                    print("  save         - Save marked points")
+                    print("  q            - Quit")
                 elif cmd == "status":
                     await self.cmd_status()
                 elif cmd == "live":
@@ -408,6 +462,12 @@ class Workbench:
                     await self.cmd_disable()
                 elif cmd == "clear":
                     await self.cmd_clear()
+                elif cmd == "continue":
+                    await self.cmd_continue()
+                elif cmd == "start_drag":
+                    await self.cmd_start_drag()
+                elif cmd == "stop_drag":
+                    await self.cmd_stop_drag()
                 elif cmd == "mode":
                     await self.cmd_mode()
                 elif cmd == "version":

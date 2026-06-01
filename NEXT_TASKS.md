@@ -145,22 +145,43 @@ git commit -m "Update PROGRESS.md after Phase 2b v1 hardware session"
 
 ---
 
-### T7. Phase 2b v2 — 補 coupling 點 + calibrate_bounds v2(離線部分 ~2 小時 + 手臂部分 ~15 分鐘)
+### T7A. calibrate_bounds 演算法升級 ✅ #12(2026-06-01)
 
-**A. 升級 `calibrate_bounds`**(離線):
-- 改用所有 coupling-labeled 點(不只 J3>50)
-- 偵測 z_floor 假冒(高 J2 + 低 J3 + FK z 接近已知 z_floor → 排除)
-- 擬合方式從「單一線性回歸」改成「piecewise linear envelope」(2-3 段)
-- 對未實採的軸 fallback 到 spec(不要用採集期間隨機落點當邊界)
-- J1 rear dead zone 從採集數據推算(不要用 placeholder 40)
+`select_coupling_points`(label-based)+ `detect_z_floor` + `filter_masquerading_points`(J2 cutoff 50° + z proximity 30mm)+ `fit_piecewise_envelope`(2-segment rising → flat)。`derive_joint_ranges` 自動 spec-fallback;`derive_j1_dead_zone` 去 cap;`compute_workspace_limits` 修為用觀察 extremes。v1.5 config 部署完成,**coupling polygon 故意留空**待 T7B。
 
-**B. 補採 6~8 個 coupling 點**(手臂):
-- 把手臂提到中等 z 高度(避免末端碰桌),再做 J2/J3 coupling
-- J2 = +30, +40, +50 各補 1 點(填中段)
-- J2 = -25, -15 補 1 點(逼近 J2 下限)
-- J3 lower limit 試:J2≈0,J3 往下推到 -25 看會不會 alarm
+**重要 lesson(別重蹈)**:v1 採的 coupling 點是 operator 主觀邊界(看快到就停),不是 controller 真 alarm 邊界。用這資料擬合會把 J3 ≤ 52 約束在 J2=0,**直接擋掉 factory pose J3≈60**(known-safe)。Deploy 會把 Phase 5 motion 全部鎖死。所以 T7B 採點協定必須改。
 
-採完跑 `calibrate_bounds v2` → safety.json v2(有 coupling polygon)→ PR
+---
+
+### T7B. 重採 coupling 點 + 部署 polygon(~1 小時要手臂)
+
+**採點協定:從「operator judgment」改成「push 到 controller 真 alarm 才停」。**
+
+**SOP**(workbench 在手臂邊):
+1. DobotStudio 確認模式為 `TCP/二次開發模式`(per finding 11)。
+2. workbench `enable` → `status` 確認 `mode=5 en=Y err=N`、Δ30004 < 0.1mm。
+3. 拖到**中等 z 高度**(避桌面 masquerading)。
+4. **每個 J2 點**(grid 建議 J2 ∈ `{-20, -15, -10, -5, 0, +5, +10, +15, +20, +30, +40}`):
+   - 拖到 (J1=0, J2=該值, J3=安全起點如 30, J4=0)、`status` 確認穩定
+   - **1° 步進往上推 J3**(workbench 暫無 jog 指令 — 可用一次性 Python script,或事先在 workbench 加 `jog j3 +1`)
+   - 每步後讀 `status`:`mode == 9` 或 `err=Y` → **立刻停**
+   - **退回上一個穩定 J3**,`mark coup_j2_<value>`
+   - `clear` → `enable`(T6 後 workbench 自己能做)→ 下一點
+5. (可選)J3 下緣:同樣手法往負方向。
+6. `save`。
+
+**Deploy gate(必過才能 PR 寫 config)**:
+```
+.venv/bin/python -m robot_core.safety.calibrate_bounds outputs/limits_<T7B>.json
+# 拿到新 polygon 後,sanity-test 必須兩條都過:
+#   ✓ factory pose FK(0,0,60,0) → approved (Phase 5 起手不會被鎖)
+#   ✓ 採點中每個「alarm 前最後一筆穩定 J3」→ approved (在邊界內側)
+#   ✗ 採點中每個「alarm 觸發那一筆」→ rejected (邊界外側)
+```
+
+三條 sanity 全過,**才能** PR 把 polygon 寫進 `config/safety.json`(`j2_j3_coupling: []` → 兩條或更多 CouplingConstraint;`_coupling_note.status: DEFERRED_TO_T7B` → `FITTED_BY_T7B`;`joint_ranges_deg.J3` 上限可從手動 77.3° 改回 spec 105°,因為現在有 polygon 保護)。
+
+任何 sanity 沒過 → **不 deploy**,重新檢視 polygon 演算法或採點協定。
 
 ---
 
