@@ -35,6 +35,23 @@ DEFAULT_INNER_MARGIN_MM = 20.0  # Buffer inside the singularity column
 DEFAULT_OUTER_MARGIN_MM = 10.0  # Buffer from maximum reach
 DEFAULT_Z_MARGIN_MM = 5.0       # Buffer from z limits
 
+# Per-axis theoretical ranges from the SDK doc — the fallback when a side of an
+# axis was not pushed close enough to the limit during a probe session. Kept
+# here as safety-domain constants (not imported from the protocol layer; T7A
+# refactor — see PROGRESS finding 13 / safety_v1.json provenance for context).
+JOINT_SPEC_RANGES_DEG: "dict[str, tuple[float, float]]" = {
+    "J1": (-160.0, 160.0),
+    "J2": (-25.0, 85.0),
+    "J3": (-25.0, 105.0),
+    "J4": (-180.0, 180.0),
+}
+
+# How close the observed extreme must come to spec for us to trust it as "this
+# side was actually probed". Beyond this gap we fall back to spec, so a random
+# in-session sample (e.g. J4 wandering between -106° and +159° during a J2/J3
+# coupling probe) is not silently encoded as the safe envelope.
+OBSERVED_TO_SPEC_THRESHOLD_DEG = 10.0
+
 
 @dataclass
 class CalibrationResult:
@@ -84,29 +101,51 @@ def load_limit_points(path: Path) -> list[dict]:
     return data["points"]
 
 
+def _pick_axis_side(
+    observed: float, spec: float, side: str,
+    threshold: float = OBSERVED_TO_SPEC_THRESHOLD_DEG,
+) -> float:
+    """Choose observed vs spec for one side of one axis.
+
+    ``side`` is ``"low"`` or ``"high"``. The observed value is trusted only when
+    it came within ``threshold`` of spec on that side (i.e. the operator
+    actually probed that limit); otherwise we fall back to spec so that an
+    un-probed side does not get encoded as a tight envelope from random samples.
+    A value that exceeds spec on its side (e.g. real-arm J1 reaching ±165°) is
+    always trusted.
+    """
+    if side == "low":
+        # observed_low close to (or past) spec_low → trust observed.
+        if observed <= spec + threshold:
+            return observed
+        return spec
+    if side == "high":
+        if observed >= spec - threshold:
+            return observed
+        return spec
+    raise ValueError(f"side must be 'low' or 'high', got {side!r}")
+
+
 def derive_joint_ranges(points: list[dict]) -> dict[str, tuple[float, float]]:
-    """Extract min/max for each joint axis from the observations."""
+    """Extract per-axis (low, high) from observations, falling back to spec on
+    sides that were not probed close enough (see :data:`OBSERVED_TO_SPEC_THRESHOLD_DEG`)."""
     if not points:
-        # Return default ranges if no points
-        return {
-            "J1": (-160.0, 160.0),
-            "J2": (-25.0, 85.0),
-            "J3": (-25.0, 105.0),
-            "J4": (-180.0, 180.0),
-        }
-    
-    # Find observed extremes
-    j1_values = [p["j1"] for p in points]
-    j2_values = [p["j2"] for p in points]
-    j3_values = [p["j3"] for p in points]
-    j4_values = [p["j4"] for p in points]
-    
-    return {
-        "J1": (min(j1_values), max(j1_values)),
-        "J2": (min(j2_values), max(j2_values)),
-        "J3": (min(j3_values), max(j3_values)),
-        "J4": (min(j4_values), max(j4_values)),
+        # Nothing observed → spec across the board.
+        return dict(JOINT_SPEC_RANGES_DEG)
+
+    by_axis = {
+        "J1": [p["j1"] for p in points],
+        "J2": [p["j2"] for p in points],
+        "J3": [p["j3"] for p in points],
+        "J4": [p["j4"] for p in points],
     }
+    ranges: "dict[str, tuple[float, float]]" = {}
+    for axis, values in by_axis.items():
+        spec_low, spec_high = JOINT_SPEC_RANGES_DEG[axis]
+        low = _pick_axis_side(min(values), spec_low, "low")
+        high = _pick_axis_side(max(values), spec_high, "high")
+        ranges[axis] = (low, high)
+    return ranges
 
 
 def fit_j2_j3_coupling(points: list[dict]) -> list[CouplingConstraint]:
@@ -238,11 +277,12 @@ def derive_j1_dead_zone(points: list[dict]) -> float:
         # Find the closest approach to ±180°
         j1_values = [p["j1"] for p in rear_points]
         min_angle_from_rear = min(180 - abs(j1) for j1 in j1_values)
-        # Dead zone is twice this distance (symmetric)
-        dead_zone = 2 * min_angle_from_rear
-        return min(dead_zone, 40.0)  # Cap at known maximum
-    
-    # Default conservative value
+        # Dead zone is twice that distance (symmetric). Trust the data — the
+        # real arm sometimes has a slightly larger rear gap than spec (v1
+        # data: ±159.9° / +157° → 43°, vs spec 40°). No artificial cap.
+        return 2 * min_angle_from_rear
+
+    # No rear-approach observation → fall back to spec dead zone (360° − 2×160°).
     return 40.0
 
 

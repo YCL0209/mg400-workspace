@@ -42,12 +42,40 @@ class TestJointRangeDerivation(unittest.TestCase):
     def test_empty_points_returns_defaults(self):
         """Empty point list returns default ranges."""
         ranges = derive_joint_ranges([])
-        
+
         # Returns tuples as per the type hint
         self.assertEqual(ranges["J1"], (-160.0, 160.0))
         self.assertEqual(ranges["J2"], (-25.0, 85.0))
         self.assertEqual(ranges["J3"], (-25.0, 105.0))
         self.assertEqual(ranges["J4"], (-180.0, 180.0))
+
+    def test_spec_fallback_for_under_probed_side(self):
+        """Side not probed close to spec → fall back to spec (don't encode random session samples)."""
+        # J4 wandered in [-106, +159] during a J2/J3 coupling probe — neither side
+        # was pushed to spec (±180). Both sides must fall back to spec.
+        points = [
+            {"j1": 0, "j2": 0, "j3": 60, "j4": -106.0, "label": "p1"},
+            {"j1": 0, "j2": 0, "j3": 60, "j4":  159.0, "label": "p2"},
+        ]
+        ranges = derive_joint_ranges(points)
+        self.assertEqual(ranges["J4"], (-180.0, 180.0))
+
+    def test_mixed_probed_one_side_only(self):
+        """One side at spec, the other under-probed → use observed for the probed side, spec for the other."""
+        # J2 upper pushed to 82.8 (close to spec 85), lower observed only -14.7 (far from -25).
+        points = [
+            {"j1": 0, "j2": -14.7, "j3": 50, "j4": 0, "label": "coup_low"},
+            {"j1": 0, "j2":  82.8, "j3": 60, "j4": 0, "label": "j2_high"},
+        ]
+        ranges = derive_joint_ranges(points)
+        self.assertEqual(ranges["J2"], (-25.0, 82.8))  # spec low, observed high
+
+    def test_observed_beyond_spec_is_trusted(self):
+        """Real arm exceeding spec on a side → trust observed (real measurement wins)."""
+        points = [{"j1": 165.0, "j2": 0, "j3": 0, "j4": 0, "label": "j1_beyond_spec"}]
+        ranges = derive_joint_ranges(points)
+        # observed_high 165 > spec 160 → use observed
+        self.assertEqual(ranges["J1"][1], 165.0)
 
 
 class TestJ2J3CouplingFit(unittest.TestCase):
@@ -116,9 +144,12 @@ class TestWorkspaceLimits(unittest.TestCase):
             points, inner_margin=0, outer_margin=0, z_margin=0
         )
 
-        # With margins
+        # With margins large enough to clear the inner 100mm floor / outer 440mm
+        # spec cap. Sparse 1-point input falls back to spec-wide grid scan whose
+        # min radius collapses near zero and max radius pushes ~458mm (clamped),
+        # so a smaller margin gets fully absorbed; real 13-pt datasets don't hit this.
         inner2, outer2, z_min2, z_max2 = compute_workspace_limits(
-            points, inner_margin=20, outer_margin=10, z_margin=5
+            points, inner_margin=100, outer_margin=50, z_margin=5
         )
 
         # Inner increases with margin (pushes away from center)
@@ -155,6 +186,16 @@ class TestJ1DeadZone(unittest.TestCase):
 
         dead_zone = derive_j1_dead_zone(points)
         self.assertEqual(dead_zone, 40.0)  # Default value
+
+    def test_dead_zone_no_artificial_cap(self):
+        """Real arm with larger rear gap than spec → return the measured value, not capped at 40."""
+        # J1 reached only ±150° → 2*(180-150) = 60° dead zone (well above the old 40° cap).
+        points = [
+            {"j1": -150.0, "j2": 0, "j3": 0, "j4": 0, "label": "j1_rear_left"},
+            {"j1":  150.0, "j2": 0, "j3": 0, "j4": 0, "label": "j1_rear_right"},
+        ]
+        dead_zone = derive_j1_dead_zone(points)
+        self.assertAlmostEqual(dead_zone, 60.0, places=1)
 
 
 class TestCalibrationResult(unittest.TestCase):
