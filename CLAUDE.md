@@ -11,8 +11,11 @@
 
 - **唯讀。** 禁止修改、禁止把專案程式碼寫進去、禁止 `import` 它的任何模組。
 - 它的**唯一用途**是查詢 TCP/IP 協定事實：埠號、指令字串格式、feedback 二進位結構、錯誤碼對照。
-- **demo 是「真的能操控硬體」的證明，凡屬線上 byte 格式 demo 贏。** SDK PDF 是規範、CLAUDE.md 是規範整理；但**任何分歧（送線 byte、socket 開啟順序、握手時序）以 demo 為準**——它跑通了多年，我們是新人。若你發現我們程式跟 demo 的線上格式不一致，**先假設我們錯**，回頭對齊 demo，再回頭證明 demo 錯（要有實機證據）。CLAUDE.md「`;` 規則」「三埠握手」都是被 demo 教過才寫上的。
-- 它的**程式風格是已知反面教材，嚴禁複製**。具體反模式：
+- **權威優先序（凡有衝突，由上往下決勝）**：
+  1. **官方 SDK PDF**（韌體是 Dobot 寫的，PDF 是 contract）—— 指令原型、參數值域、回應結構、feedback byte offset 表都以 PDF 為終審。**完整審計請見 `docs/OFFICIAL_VS_PROJECT_DIFF.md`** + 規範參考 `docs/OFFICIAL_COORDINATE_SYSTEM_SPEC.md`。
+  2. **demo（reference fork）線上 byte 格式**——當 PDF 不明確、或我們程式碼跟 demo 行為衝突時，demo 是「跑了多年的活證據」。送線 byte、socket 順序、握手時序屬此級。發現分歧**先假設我們錯**，對齊 demo，再用實機證據反證。
+  3. **CLAUDE.md / PROGRESS.md 等本地文件**——是 1+2 的整理 + 我們實機補出的擴充（如 finding 17 三埠 mount、finding 19 J3−J2≤60 coupling），權威性最低，會被上層更新覆蓋。
+- 它的**程式風格是已知反面教材，嚴禁複製**——demo 教我們的是「線上協定如何接」，**不是「程式碼怎麼寫」**。具體反模式：
   1. 連線寫死在 `__init__`，無法重連 / 重試
   2. `recv(1024)` 假設「一次收一則」，未做協定分幀（TCP 不保證訊息邊界）
   3. 指令全靠手工拼字串、零參數驗證（且原檔已含多個複製貼上 bug：`SetHoldRegs` if/else 寫反、`DOGroup` 從未送出指令、`ToolDI` 送成 `DI`）
