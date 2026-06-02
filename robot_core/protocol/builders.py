@@ -186,23 +186,23 @@ def robot_mode() -> str:
     return "RobotMode()"
 
 
-def get_pose(user: "int | None" = None, tool: "int | None" = None) -> str:
-    """Query the current Cartesian pose.
+def get_pose() -> str:
+    """Query the current Cartesian pose (always in the active global frame).
 
-    Optional ``user``/``tool`` are calibrated coordinate-system indices [0, 9]
-    (PDF: ``GetPose(User=,Tool=)``); both omitted queries the global frame as
-    ``GetPose()``. They are given together or not at all (the simplified form
-    does not emit one without the other).
+    The PDF documents an optional ``GetPose(User=, Tool=)`` form, but the MG400
+    1.7.0.0 firmware on TCP/二次開發 mode does NOT support per-call frame
+    selection (verified 2026-06-02, PROGRESS finding 22):
+    - keyword syntax ``GetPose(User=1,Tool=0)`` returns error -30001
+    - positional ``GetPose(1,0)`` is accepted but the args are silently ignored
+      (reply equals the base-frame pose)
+    - ``User()`` accepted (returns ``0,{}``) but sets the global frame for
+      *future motion commands* only — it does NOT affect what GetPose returns
+
+    To read a pose in a non-base frame, do the transform client-side
+    (``robot_core.kinematics.transform``, Phase 6.1) using a SetUser/SetTool
+    value the client remembers from when it wrote the slot.
     """
-    if user is None and tool is None:
-        return "GetPose()"
-    if user is None or tool is None:
-        raise CommandValidationError(
-            "GetPose User and Tool must be given together or not at all"
-        )
-    u = _require_int_in_range("GetPose.User", user, 0, 9)
-    t = _require_int_in_range("GetPose.Tool", tool, 0, 9)
-    return f"GetPose(User={u:d},Tool={t:d})"
+    return "GetPose()"
 
 
 def get_angle() -> str:
