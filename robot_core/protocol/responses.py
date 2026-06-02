@@ -124,12 +124,20 @@ def parse_response(message: str) -> DashboardResponse:
 
 
 def _four_floats(payload: str) -> "tuple[float, float, float, float]":
-    """Parse a 4-value comma-separated payload (X,Y,Z,R or J1,J2,J3,J4)."""
+    """Parse the first 4 comma-separated floats from a payload.
+
+    Used for both Cartesian ``{x,y,z,r}`` (4 values) and joint ``{J1,J2,J3,J4}``
+    (4 values on the SDK but ALSO 6 values for ``GetAngle`` on a 4-axis MG400 —
+    the firmware shares a 6-axis SDK and pads ``J5,J6`` with zeros). We accept
+    4 or more and discard the rest; refusing fewer than 4 is the real check.
+    """
     parts = [p for p in payload.split(",") if p.strip() != ""]
-    if len(parts) != 4:
-        raise ProtocolResponseError(f"expected 4 comma-separated values, got {payload!r}")
+    if len(parts) < 4:
+        raise ProtocolResponseError(
+            f"expected at least 4 comma-separated values, got {len(parts)}: {payload!r}"
+        )
     try:
-        a, b, c, d = (float(p) for p in parts)
+        a, b, c, d = (float(p) for p in parts[:4])
     except ValueError as exc:
         raise ProtocolResponseError(f"non-numeric value in payload {payload!r}") from exc
     return a, b, c, d

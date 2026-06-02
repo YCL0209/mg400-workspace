@@ -198,7 +198,21 @@ class ResponseParsingTests(unittest.TestCase):
         self.assertTrue(result.is_ok)
         self.assertEqual((result.j1, result.j2, result.j3, result.j4), (0.0, 20.0, 60.0, 0.0))
 
+    def test_parse_angle_accepts_six_values_from_4axis_firmware(self):
+        # Real hardware (4-axis MG400, controller 1.7.0.0): GetAngle returns 6
+        # comma-separated values with J5,J6 padded as 0. The firmware shares the
+        # 6-axis SDK protocol; we take the first 4 and discard the padding.
+        # See PROGRESS finding (post-2026-06-02 hardware verification).
+        raw = "0,{1.568910,43.076424,31.149742,15.652771,0.000000,0.000000},GetAngle()"
+        result = parse_angle(parse_response(raw))
+        self.assertTrue(result.is_ok)
+        self.assertAlmostEqual(result.j1, 1.568910)
+        self.assertAlmostEqual(result.j2, 43.076424)
+        self.assertAlmostEqual(result.j3, 31.149742)
+        self.assertAlmostEqual(result.j4, 15.652771)
+
     def test_parse_pose_wrong_arity_raises(self):
+        # Fewer than 4 values is a real error (truncated payload).
         with self.assertRaises(ProtocolResponseError):
             parse_pose(parse_response("0,{1.0,2.0,3.0},GetPose()"))
 
