@@ -235,9 +235,15 @@ class Workbench:
         print()  # New line after live mode
 
     async def cmd_enable(self, args: str = ""):
-        """Enable robot via dashboard, optionally with a payload load (kg).
+        """Enable robot via dashboard, optionally declaring payload + centre-of-mass.
 
-        Usage: ``enable`` or ``enable <load_kg>`` (e.g. ``enable 0.5``).
+        Usage matches the firmware 0/1/4-param signature (PR #21 / B1):
+        - ``enable``                — bare flange, no dynamics declaration
+        - ``enable <load_kg>``      — declare payload only (e.g. ``enable 0.5``)
+        - ``enable <load> <cx> <cy> <cz>`` — payload + centre-of-mass (mm,
+          eccentricity per axis, in [-500, 500]). Needed for accurate dynamics
+          with an off-centre gripper/jig — without this the motors over-compensate
+          for a phantom load and you hear a persistent whine.
 
         Pre-checks feedback state: if the controller is already enabled, skips
         sending EnableRobot() because re-issuing it on this firmware (MG400
@@ -250,12 +256,24 @@ class Workbench:
             return
 
         load = None
-        if args.strip():
-            try:
-                load = float(args.split()[0])
-            except ValueError:
-                print(f"enable: invalid load {args.strip()!r} — expected kg, e.g. `enable 0.5`")
+        cx = cy = cz = None
+        parts = args.split()
+        if parts:
+            if len(parts) not in (1, 4):
+                print(
+                    f"enable: takes 0, 1, or 4 args (got {len(parts)}). "
+                    "Usage: `enable` | `enable <load_kg>` | `enable <load> <cx> <cy> <cz>`"
+                )
                 return
+            try:
+                values = [float(p) for p in parts]
+            except ValueError:
+                print(f"enable: non-numeric arg in {args.strip()!r}")
+                return
+            if len(values) == 1:
+                load = values[0]
+            else:
+                load, cx, cy, cz = values
 
         snap = self.state.snapshot if self.state is not None else None
         if snap is not None and snap.is_enabled:
@@ -265,10 +283,17 @@ class Workbench:
             )
             return
 
-        cmd_str = "EnableRobot()" if load is None else f"EnableRobot({load})"
+        if load is None:
+            cmd_str = "EnableRobot()"
+        elif cx is None:
+            cmd_str = f"EnableRobot({load})"
+        else:
+            cmd_str = f"EnableRobot({load},{cx},{cy},{cz})"
         print(f"Sending: {cmd_str}")
         try:
-            response = self.dashboard.enable_robot(load)
+            response = self.dashboard.enable_robot(
+                load=load, center_x=cx, center_y=cy, center_z=cz
+            )
             print(f"Received: {response.raw}")
             if response.error_id == 0:
                 print("Robot enabled successfully")

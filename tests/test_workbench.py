@@ -198,6 +198,52 @@ class TestCommandRouting(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Already enabled", output)
         self.assertIn("finding 16", output)
 
+    async def test_enable_with_load_only_passes_load(self):
+        """`enable 0.5` parses to enable_robot(load=0.5, others=None)."""
+        response = DashboardResponse(error_id=0, payload="", raw="0,,EnableRobot(0.5);")
+        self.dashboard.enable_robot.return_value = response
+
+        with patch("builtins.print"):
+            await self.workbench.cmd_enable("0.5")
+
+        self.dashboard.enable_robot.assert_called_once_with(
+            load=0.5, center_x=None, center_y=None, center_z=None
+        )
+
+    async def test_enable_with_four_params_passes_centre_of_mass(self):
+        """`enable 0.5 0 0 30` parses to enable_robot(load=0.5, center_*=...).
+
+        Regression: workbench previously did `args.split()[0]` and dropped the
+        last 3 args → centre-of-mass was silently lost. Caught on hardware
+        during H3 verification (2026-06-02 session)."""
+        response = DashboardResponse(
+            error_id=0, payload="", raw="0,,EnableRobot(0.5,0,0,30);"
+        )
+        self.dashboard.enable_robot.return_value = response
+
+        with patch("builtins.print"):
+            await self.workbench.cmd_enable("0.5 0 0 30")
+
+        self.dashboard.enable_robot.assert_called_once_with(
+            load=0.5, center_x=0.0, center_y=0.0, center_z=30.0
+        )
+
+    async def test_enable_with_two_or_three_args_rejected(self):
+        """Only 0/1/4 args allowed (matches firmware signature)."""
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_enable("0.5 0")
+        self.dashboard.enable_robot.assert_not_called()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("0, 1, or 4", output)
+
+    async def test_enable_non_numeric_args_rejected(self):
+        """Non-numeric load or centre value rejected before sending."""
+        with patch("builtins.print") as mock_print:
+            await self.workbench.cmd_enable("abc")
+        self.dashboard.enable_robot.assert_not_called()
+        output = "\n".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("non-numeric", output)
+
     async def test_disable_calls_dashboard(self):
         """Disable command routes to DashboardClient.disable_robot()."""
         response = DashboardResponse(error_id=0, payload="", raw="0,,DisableRobot();")
