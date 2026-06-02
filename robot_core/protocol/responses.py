@@ -37,14 +37,23 @@ class DashboardResponse:
 
 @dataclass(frozen=True)
 class PoseResult:
-    """Parsed GetPose reply: Cartesian (x, y, z, r) in mm/deg. Fields are None
-    when the controller returned an error (``error_id != 0``)."""
+    """Parsed Cartesian (x, y, z, r) reply in mm/deg — from GetPose, CalcUser,
+    CalcTool, or PositiveSolution. Coordinate fields are None when the controller
+    returned an error (``error_id != 0``).
+
+    ``user_index`` / ``tool_index`` record the coordinate-system frame the pose is
+    expressed in, when the caller specified one (e.g. ``GetPose(User=1,Tool=0)``
+    or ``PositiveSolution(...,User,Tool)``). They are None when no frame was
+    requested (global frame) — the reply itself does not echo them, so they carry
+    only what the caller passed."""
 
     error_id: int
     x: "float | None" = None
     y: "float | None" = None
     z: "float | None" = None
     r: "float | None" = None
+    user_index: "int | None" = None
+    tool_index: "int | None" = None
 
     @property
     def is_ok(self) -> bool:
@@ -126,12 +135,24 @@ def _four_floats(payload: str) -> "tuple[float, float, float, float]":
     return a, b, c, d
 
 
-def parse_pose(response: DashboardResponse) -> PoseResult:
-    """Type a GetPose reply into a :class:`PoseResult` (no values on error)."""
+def parse_pose(
+    response: DashboardResponse,
+    *,
+    user_index: "int | None" = None,
+    tool_index: "int | None" = None,
+) -> PoseResult:
+    """Type a Cartesian ``{x,y,z,r}`` reply into a :class:`PoseResult`.
+
+    Shared by GetPose / CalcUser / CalcTool / PositiveSolution. ``user_index`` /
+    ``tool_index`` are attached verbatim (the reply does not echo them) so the
+    result records which frame the caller asked for; on error no coords are set.
+    """
     if not response.is_ok:
-        return PoseResult(response.error_id)
+        return PoseResult(response.error_id, user_index=user_index, tool_index=tool_index)
     x, y, z, r = _four_floats(response.payload)
-    return PoseResult(response.error_id, x, y, z, r)
+    return PoseResult(
+        response.error_id, x, y, z, r, user_index=user_index, tool_index=tool_index
+    )
 
 
 def parse_angle(response: DashboardResponse) -> AngleResult:
