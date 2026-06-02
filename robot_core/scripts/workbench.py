@@ -84,6 +84,11 @@ SNAPSHOT_SETTLE_TOL_DEG = 0.5
 SNAPSHOT_SETTLE_TIMEOUT_S = 2.0
 SNAPSHOT_POLL_INTERVAL_S = 0.02
 
+# Phase 5 motion completion timeout: cap any single move at 30s. T9's two safe
+# poses (~150mm apart at 20% speed) finish in <2s; 30s is the slack for slow
+# moves near limits. Both Sync() and the alarm sidecar share this ceiling.
+MOTION_TIMEOUT_S = 30.0
+
 
 @dataclass
 class LimitPoint:
@@ -583,6 +588,82 @@ class Workbench:
         target = (joints[0], joints[1], joints[2], joints[3])
         await self._arm_joint_move(target, f"jog {axis} {delta:+.2f}")
 
+    async def _await_motion_complete(
+        self, op_desc: str, *, timeout_s: float = MOTION_TIMEOUT_S
+    ) -> bool:
+        """Wait for queued motion to finish — Sync as primary, alarm as sidecar.
+
+        Per PDF p.5/48/56: ``Sync()`` is the standard "wait for motion complete"
+        signal — it blocks until the controller's queue drains. We wrap it in
+        :func:`asyncio.to_thread` so the workbench event loop keeps spinning
+        (CLAUDE.md "dashboard request-response may be sync" applies, but a
+        20-second Sync() would freeze input handling).
+
+        The PDF does not define Sync's behaviour under alarm, so we run an
+        independent edge subscription (``state.wait_for(mode==9 or has_error)``)
+        in parallel. Whichever fires first wins; the loser is cancelled. On
+        alarm we surface :meth:`DashboardClient.get_error_id` for diagnosis.
+
+        Returns ``True`` on clean completion, ``False`` on alarm / queue error
+        / overall timeout. The Sync thread may continue running past return —
+        we don't await it (no way to cancel a thread from outside), but the
+        controller will eventually reply and the future is GC'd.
+        """
+        sync_task = asyncio.create_task(
+            asyncio.to_thread(self.move.sync, timeout_s=timeout_s)
+        )
+        alarm_task = asyncio.create_task(
+            self.state.wait_for(
+                lambda s: s.robot_mode == ROBOT_MODE_ERROR or s.has_error
+            )
+        )
+
+        done, pending = await asyncio.wait(
+            [sync_task, alarm_task],
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=timeout_s,
+        )
+        for t in pending:
+            t.cancel()
+
+        if not done:
+            print(
+                f"⚠ {op_desc}: timeout after {timeout_s}s "
+                f"— neither Sync nor alarm fired"
+            )
+            return False
+
+        if alarm_task in done:
+            try:
+                snap = alarm_task.result()
+                print(
+                    f"⚠ {op_desc}: ALARM — mode={snap.robot_mode} "
+                    f"err={snap.has_error}"
+                )
+                if self.dashboard:
+                    try:
+                        err = self.dashboard.get_error_id()
+                        print(f"  GetErrorID: {err}")
+                    except Exception as e:
+                        print(f"  (could not query GetErrorID: {e})")
+                return False
+            except asyncio.CancelledError:
+                pass  # sync_task also in done — fall through
+
+        if sync_task in done:
+            try:
+                resp = sync_task.result()
+            except Exception as e:
+                print(f"⚠ {op_desc}: Sync() failed: {e}")
+                return False
+            if resp.error_id != 0:
+                print(f"⚠ {op_desc}: Sync returned error {resp.error_id}: {resp.raw}")
+                return False
+            print(f"{op_desc}: motion complete")
+            return True
+
+        return False
+
     def _check_motion_preconditions(self, op_desc: str) -> Optional[RobotStateSnapshot]:
         """Common pre-flight for cmd_move_l / cmd_joint_mov_j.
 
@@ -660,9 +741,19 @@ class Workbench:
 
         print(
             f"move_l: target=({x:.1f},{y:.1f},{z:.1f},{r:.1f}) "
-            f"speed={speed if speed is not None else 'default'} "
-            f"safety=OK [motion send not wired yet]"
+            f"speed={speed if speed is not None else 'default'}"
         )
+        mov_kwargs = {} if speed is None else {"speed_l": speed}
+        try:
+            ack = self.move.mov_l(x, y, z, r, **mov_kwargs)
+        except Exception as e:
+            print(f"move_l: send error: {e}")
+            return
+        if ack.error_id != 0:
+            print(f"move_l: queue rejected — error {ack.error_id}: {ack.raw}")
+            return
+
+        await self._await_motion_complete("move_l")
 
     async def cmd_joint_mov_j(self, args: str):
         """Absolute joint move via JointMovJ. Safety-gated, event-driven completion.
@@ -728,9 +819,19 @@ class Workbench:
 
         print(
             f"joint_mov_j: target=({j1:.1f},{j2:.1f},{j3:.1f},{j4:.1f}) "
-            f"speed={speed if speed is not None else 'default'} "
-            f"safety=OK [motion send not wired yet]"
+            f"speed={speed if speed is not None else 'default'}"
         )
+        mov_kwargs = {} if speed is None else {"speed_j": speed}
+        try:
+            ack = self.move.joint_mov_j(j1, j2, j3, j4, **mov_kwargs)
+        except Exception as e:
+            print(f"joint_mov_j: send error: {e}")
+            return
+        if ack.error_id != 0:
+            print(f"joint_mov_j: queue rejected — error {ack.error_id}: {ack.raw}")
+            return
+
+        await self._await_motion_complete("joint_mov_j")
 
     async def cmd_mode(self):
         """Query robot mode via dashboard."""

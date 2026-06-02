@@ -1,5 +1,6 @@
 """Test the workbench REPL logic offline (no hardware connection)."""
 
+import asyncio
 import json
 import math
 import tempfile
@@ -853,11 +854,11 @@ class TestSpeed(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Dashboard not connected", output)
 
 
-class TestMoveLSkeleton(unittest.IsolatedAsyncioTestCase):
-    """move_l <x> <y> <z> <r> [speed] — parse + pre-check stage only.
+class TestMoveLRejections(unittest.IsolatedAsyncioTestCase):
+    """move_l <x> <y> <z> <r> [speed] — parse / pre-check / safety rejections.
 
-    Safety gate and motion send are added in later commits; these tests pin
-    down the arg-validation and pre-check fail-fast paths.
+    Motion send is mocked out (`_await_motion_complete` returns True
+    immediately) so these tests focus on the upstream fail-fast paths.
     """
 
     def setUp(self):
@@ -867,24 +868,27 @@ class TestMoveLSkeleton(unittest.IsolatedAsyncioTestCase):
         self.monitor = MagicMock()
         self.dashboard = MagicMock()
         self.move = MagicMock()
+        self.move.mov_l.return_value = DashboardResponse(
+            error_id=0, payload="", raw="0,,MovL();"
+        )
         self.workbench = Workbench(
             self.config, self.state, self.monitor, self.dashboard, move=self.move
         )
+        # Skip the Sync sidecar in rejection tests — TestMoveLMotion covers it.
+        self.workbench._await_motion_complete = AsyncMock(return_value=True)
 
-    async def test_happy_path_passes_preconditions(self):
-        with patch("builtins.print") as mp:
+    async def test_happy_path_passes_preconditions_and_sends(self):
+        with patch("builtins.print"):
             await self.workbench.cmd_move_l("250 0 -30 0")
-        # Skeleton placeholder is printed; mov_l never called yet.
-        self.move.mov_l.assert_not_called()
-        output = "\n".join(str(c) for c in mp.call_args_list)
-        self.assertIn("target=(250.0,0.0,-30.0,0.0)", output)
-        self.assertIn("safety=OK", output)
+        self.move.mov_l.assert_called_once_with(250.0, 0.0, -30.0, 0.0)
+        self.workbench._await_motion_complete.assert_awaited_once()
 
-    async def test_with_speed_arg_parses(self):
-        with patch("builtins.print") as mp:
+    async def test_with_speed_arg_passes_speed_l_kwarg(self):
+        with patch("builtins.print"):
             await self.workbench.cmd_move_l("250 0 -30 0 20")
-        output = "\n".join(str(c) for c in mp.call_args_list)
-        self.assertIn("speed=20", output)
+        self.move.mov_l.assert_called_once_with(
+            250.0, 0.0, -30.0, 0.0, speed_l=20
+        )
 
     async def test_wrong_arg_count_rejected(self):
         for args in ("", "1 2 3", "1 2 3 4 5 6"):
@@ -959,8 +963,8 @@ class TestMoveLSkeleton(unittest.IsolatedAsyncioTestCase):
         self.assertIn("REJECT", output)
 
 
-class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
-    """joint_mov_j <j1> <j2> <j3> <j4> [speed] — parse + pre-check stage only."""
+class TestJointMovJRejections(unittest.IsolatedAsyncioTestCase):
+    """joint_mov_j <j1> <j2> <j3> <j4> [speed] — parse / pre-check / safety."""
 
     def setUp(self):
         self.config = MagicMock()
@@ -969,23 +973,26 @@ class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
         self.monitor = MagicMock()
         self.dashboard = MagicMock()
         self.move = MagicMock()
+        self.move.joint_mov_j.return_value = DashboardResponse(
+            error_id=0, payload="", raw="0,,JointMovJ();"
+        )
         self.workbench = Workbench(
             self.config, self.state, self.monitor, self.dashboard, move=self.move
         )
+        self.workbench._await_motion_complete = AsyncMock(return_value=True)
 
-    async def test_happy_path_passes_preconditions(self):
-        with patch("builtins.print") as mp:
+    async def test_happy_path_passes_preconditions_and_sends(self):
+        with patch("builtins.print"):
             await self.workbench.cmd_joint_mov_j("0 0 55 0")
-        self.move.joint_mov_j.assert_not_called()
-        output = "\n".join(str(c) for c in mp.call_args_list)
-        self.assertIn("target=(0.0,0.0,55.0,0.0)", output)
-        self.assertIn("safety=OK", output)
+        self.move.joint_mov_j.assert_called_once_with(0.0, 0.0, 55.0, 0.0)
+        self.workbench._await_motion_complete.assert_awaited_once()
 
-    async def test_with_speed_arg_parses(self):
-        with patch("builtins.print") as mp:
+    async def test_with_speed_arg_passes_speed_j_kwarg(self):
+        with patch("builtins.print"):
             await self.workbench.cmd_joint_mov_j("0 0 55 0 30")
-        output = "\n".join(str(c) for c in mp.call_args_list)
-        self.assertIn("speed=30", output)
+        self.move.joint_mov_j.assert_called_once_with(
+            0.0, 0.0, 55.0, 0.0, speed_j=30
+        )
 
     async def test_wrong_arg_count_rejected(self):
         for args in ("", "1 2 3", "1 2 3 4 5 6"):
@@ -1045,6 +1052,133 @@ class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
         self.move.joint_mov_j.assert_not_called()
         output = "\n".join(str(c) for c in mp.call_args_list)
         self.assertIn("COUPLING_VIOLATED", output)
+
+
+class _MotionTestBase(unittest.IsolatedAsyncioTestCase):
+    """Shared setup for cmd_move_l / cmd_joint_mov_j Sync sidecar tests.
+
+    state.wait_for is replaced with a real async function (not AsyncMock) so
+    asyncio.create_task wraps it cleanly. Per-subclass overrides supply the
+    alarm vs. no-alarm behaviour. self.move.sync is left as a regular Mock —
+    asyncio.to_thread calls it synchronously in a worker thread.
+    """
+
+    OK_ACK = DashboardResponse(error_id=0, payload="", raw="0,,Mov();")
+    OK_SYNC = DashboardResponse(error_id=0, payload="", raw="0,,Sync();")
+
+    def setUp(self):
+        self.config = MagicMock()
+        self.state = MagicMock()
+        self.state.snapshot = _snap()
+        # No alarm by default — wait_for hangs until cancelled (sync wins races).
+        self.state.wait_for = self._never_alarm
+        self.monitor = MagicMock()
+        self.dashboard = MagicMock()
+        self.dashboard.get_error_id.return_value = "GetErrorID-mock-payload"
+        self.move = MagicMock()
+        self.move.mov_l.return_value = self.OK_ACK
+        self.move.joint_mov_j.return_value = self.OK_ACK
+        self.move.sync.return_value = self.OK_SYNC
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=self.move
+        )
+
+    @staticmethod
+    async def _never_alarm(predicate, *, timeout=None):
+        """Hang until cancelled (simulates `no alarm fires` — sync wins)."""
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+        return None  # never reached
+
+
+class TestMoveLMotion(_MotionTestBase):
+    """move_l end-to-end: motion send + Sync sidecar branches."""
+
+    async def test_sync_wins_returns_motion_complete(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        self.move.mov_l.assert_called_once_with(250.0, 0.0, -30.0, 0.0)
+        self.move.sync.assert_called_once()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("motion complete", output)
+
+    async def test_queue_ack_error_skips_sync(self):
+        self.move.mov_l.return_value = DashboardResponse(
+            error_id=-30000, payload="", raw="-30000,,MovL();"
+        )
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        self.move.sync.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("queue rejected", output)
+        self.assertIn("-30000", output)
+
+    async def test_alarm_sidecar_fires_first_calls_get_error_id(self):
+        alarm_snap = _snap(robot_mode=9, error_status=1)
+
+        async def fast_alarm(predicate, *, timeout=None):
+            return alarm_snap
+
+        self.state.wait_for = fast_alarm
+        # Make Sync slow so alarm definitely wins.
+        self.move.sync.side_effect = lambda *, timeout_s: (
+            __import__("time").sleep(0.1) or self.OK_SYNC
+        )
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        self.move.mov_l.assert_called_once()
+        self.dashboard.get_error_id.assert_called_once()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("ALARM", output)
+
+    async def test_sync_returns_error_id_reported(self):
+        self.move.sync.return_value = DashboardResponse(
+            error_id=-1, payload="", raw="-1,,Sync();"
+        )
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("Sync returned error", output)
+
+
+class TestJointMovJMotion(_MotionTestBase):
+    """joint_mov_j end-to-end: motion send + Sync sidecar branches."""
+
+    async def test_sync_wins_returns_motion_complete(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 55 0")
+        self.move.joint_mov_j.assert_called_once_with(0.0, 0.0, 55.0, 0.0)
+        self.move.sync.assert_called_once()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("motion complete", output)
+
+    async def test_queue_ack_error_skips_sync(self):
+        self.move.joint_mov_j.return_value = DashboardResponse(
+            error_id=-30000, payload="", raw="-30000,,JointMovJ();"
+        )
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 55 0")
+        self.move.sync.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("queue rejected", output)
+
+    async def test_alarm_sidecar_fires_first(self):
+        alarm_snap = _snap(robot_mode=9, error_status=1)
+
+        async def fast_alarm(predicate, *, timeout=None):
+            return alarm_snap
+
+        self.state.wait_for = fast_alarm
+        self.move.sync.side_effect = lambda *, timeout_s: (
+            __import__("time").sleep(0.1) or self.OK_SYNC
+        )
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 55 0")
+        self.dashboard.get_error_id.assert_called_once()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("ALARM", output)
 
 
 if __name__ == "__main__":
