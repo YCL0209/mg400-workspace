@@ -406,6 +406,115 @@ mg400> # 然後 ad-hoc:
 
 ---
 
+## 🗺️ 三段策略路線圖(2026-06-02 拍板,使用者的整體規劃)
+
+> **核心理念**:**先把手臂端開發完、再做座標系 UI 介面、最後才從既有 CV 整合視覺**。三段嚴格依序,不跨段並行(避免每段需求互相 leak)。
+>
+> 已決定的架構約束 — **UI 用 Three.js + WebGL 前端 + Python WebSocket 後端**(2026-06-02 拍板,記憶 `project-ui-stack-threejs.md`)。原本「Phase 7 API server 視需要再加」改為**必要**,WebSocket server 就是 P7。
+
+### 段 1:手臂端收尾(段 2 前置,要硬體)
+
+| 子段 | 工作 | 工時 | 狀態 |
+|---|---|---|---|
+| 1.0 | **暖身**:H1 + H2 + H3(feedback `r` 對位 / FK-IK 控制器交叉驗 / EnableRobot 0/1/4)| ~20 分 | ⏳ 下次硬體 session |
+| 1.1 | **主菜**:T8 Phase 5 motion 原語(MovJ/MovL 穿 safety gate + 事件驅動到位)| ~3-4 小時 | ⏳ 下次硬體 session |
+| 1.2 | **驗證切片**:T9 demo(2 pose 來回 5 次無 alarm)| ~30 分 | ⏳ 跟 T8 同 session |
+| 1.3 | **T10 Phase 6 controller**:狀態機 + 任務佇列 + `controller.move_to(pose, user=, tool=, speed=)` API + TCP/Tool offset 架構(用 PR #22 set_tool / calc_tool)| ~大,分 2-3 PR | T8/T9 穩了再開,**半離線半硬體** |
+| 1.4 | **H4**(PR #21 / Mov* kwargs 實機驗)| ~跟 T8 同步 | 綁進 T8 一起做 |
+
+**段 1 結束訊號**:`controller.move_to(pose_a) → move_to(pose_b) → move_to(pose_a)` 一行可呼叫,每步穿 safety gate、事件驅動、不用 sleep。**段 1 通過才能進段 2。**
+
+### 段 2:座標系 UI 介面(離線可大量做,但需 T10 API)
+
+**架構**:
+```
+robot_core/
+├─ (既有)transport / state / protocol / safety / kinematics / scripts
+└─ api/                ← 新:WebSocket server(Phase 7,原選配升必要)
+   ├─ server.py        ← fastapi / starlette / pure websockets,擇一
+   ├─ serializers.py   ← Snapshot.to_dict() / Pose.to_dict() (JSON-friendly)
+   └─ protocol.py      ← ws message schema(client→server 指令、server→client state push)
+web/                   ← 新:前端 npm 專案,獨立 package.json,跟後端解耦
+├─ package.json / vite.config.js / index.html
+└─ src/
+   ├─ scene.js         ← Three.js 場景:grid + 4 frame axes + 手臂 4 段連桿 mesh
+   ├─ ws.js            ← ws client,訂閱 state push、送 user/tool/move 指令
+   ├─ frames.js        ← 4 frame 渲染(Base/Flange/active User/active Tool),透過 transform.py 算
+   └─ ui.js            ← 控制 panel:切 User/Tool、定義 frame、E-stop
+```
+
+**任務樹**:
+
+| 子段 | 工作 | 工時 | 性質 |
+|---|---|---|---|
+| 2.1 | `robot_core/kinematics/transform.py` — 4×4 同質變換 + frame chain 連乘 + 左乘/右乘對應 PR #22 calc_user/calc_tool 控制器算法交叉驗 + `to_dict()` for JSON | ~2-3 小時 | 純離線數學 |
+| 2.2 | **Phase 7 ws server**(`robot_core/api/server.py`):state push at feedback cadence(8ms)、command channel、JSON schema 釘住 | ~4-5 小時 | 離線寫 + 一點硬體驗 |
+| 2.3a | 前端 Three.js scene:Vite + Three.js 起手、grid + 4 frame axes(X=R/Y=G/Z=B)、手臂簡化 mesh(從 FK 算 segment 位置)、orbit camera | ~6-8 小時 | 離線,**含學習曲線** |
+| 2.3b | 前端 UI 控制 panel:User/Tool 切換按鈕、pose 在不同 frame 下的座標顯示、Set User frame(拖點 → calc_user + set_user)、E-stop 按鈕 | ~3-4 小時 | 離線 |
+| 2.4 | Camera frame placeholder:第 5 個 frame,外參矩陣先 identity,等段 3 校正完才填真值 | ~1 小時 | 離線 |
+
+**段 2 合計**:~16-21 小時,**跨 3-5 個 session**。
+
+**段 2 兩個待決定(現在可不答,動 6.2/6.3 前再決)**:
+
+| 決定 | 候選 | 我的傾向 |
+|---|---|---|
+| **A. ws server 框架** | FastAPI / `websockets` lib / Starlette | **FastAPI**(以後加 REST endpoint 順手) |
+| **B. 前端構建工具** | Vite + vanilla JS / Vite + React + r3f / Vite + Vue + TresJS / 純 CDN | **Vite + vanilla JS**(使用者前端不熟,少一層抽象更易學 Three.js 本身) |
+
+**段 2 結束訊號**:UI 上能看到手臂即時動、能切 User/Tool、能定義新 frame、camera frame 預留好。**段 2 通過才進段 3。**
+
+### 段 3:視覺整合(需段 1 + 段 2 + 使用者既有 CV code)
+
+| 子段 | 工作 | 工時 | 性質 |
+|---|---|---|---|
+| 3.0 | **視覺管線移植**:使用者既有 CV code 改造,包成「camera → 2D 像素 → 物件 class + 置信度」純 pipeline,跟 robot_core **完全解耦**(不 import 它),輸出標準格式(dict / dataclass / message)| ~未定,看既有 code | 離線(camera + CV) |
+| 3.1 | **手眼校正**:決定 setup(eye-in-hand 還 eye-to-base)、採 10+ 個對應點(手臂已知 base 座標 ↔ camera 像素 / 已知物件)、用 transform.py 算外參矩陣、寫進 `config/camera_eye.json` | ~1-2 session | 要手臂 + camera |
+| 3.2 | **視覺 → 動作整合**:vision_output → camera 座標 → base 座標(透過 eye 外參)→ `controller.move_to(target_pose, ...)`、end-to-end demo:放物 → 視覺辨識 → 手臂到位、UI 上同時顯示 camera frustum + 辨識結果疊在 base frame | ~6-8 小時 | 軟體 + 一點硬體驗 |
+
+**段 3 兩個待決定**:
+
+| 決定 | 候選 | 影響 |
+|---|---|---|
+| **C. Camera setup** | eye-in-hand(camera 鎖法蘭)/ eye-to-base(camera 固定上方)| 校正寫法(`calibrateHandEye` 變體) |
+| **D. 既有 CV 整合形式** | 整段拉進來重組 / 包成 subprocess + IPC / 包成 lib import | 看既有 code 結構 |
+
+**段 3 結束訊號**:UI 顯示物件 → 一鍵或自動 → 手臂安全到位,跑 5 次無 alarm。**= 里程碑 P10 完成,終局形態達成。**
+
+---
+
+## 路線圖總覽
+
+```
+里程碑一(控制堆疊) ── 91% 完成
+├─ Phase 0-4 ✅
+├─ Phase 2b v2 / T7B ✅(2026-06-01)
+├─ Phase 3.1 + 3.2 ✅(2026-06-02,含官方對齊 B1-B3、B6)
+├─ Phase 5 motion (T8) ─────── ⏳ 下次硬體 session(段 1)
+├─ demo 切片 (T9) ────────────── ⏳ 跟 T8 同 session(段 1)
+└─ Phase 6 controller (T10) ─── ⏳ T8/T9 穩了再開(段 1)
+                                  └─ tool offset 用 PR #22 set_tool/calc_tool
+
+座標系 UI 介面 ── 0%(段 2)
+├─ Phase 6.1 transform.py ───── 離線可開
+├─ Phase 7 ws server ────────── 段 1 T10 穩了再開
+├─ 前端 Three.js scene+panel ── ws server 跑通才開
+└─ camera frame placeholder ─── 段 2 收尾
+
+視覺整合(里程碑二) ── 0%(段 3)
+├─ Phase 9 視覺管線(既有 CV 移植)── 段 2 完了開始
+├─ Phase 10 手眼校正 ─────────── 視覺管線 ready + UI 能看 frame
+└─ 整合 demo ─────────────────── 校正完(= 終局)
+
+範圍外
+├─ P8 MongoDB(視需要再加)
+└─ P11 AI agent / 里程碑三(砍)
+```
+
+**全段 1+2+3 合計:~25-35 小時**,跨 8-10 個 session。**強制依序**(段 1 → 段 2 → 段 3)。
+
+---
+
 ## 預估工時
 
 - P0(T1-T4):**1 小時**(全離線)
