@@ -254,5 +254,240 @@ class ClientWiringTests(unittest.TestCase):
         self.assertFalse(hasattr(DashboardClient, "sync"))
 
 
+class CoordinateBuilderTests(unittest.TestCase):
+    """Phase 3.2 coordinate-system & kinematics command strings + validation."""
+
+    def test_user_wire(self):
+        self.assertEqual(builders.user(1), "User(1)")
+        self.assertEqual(builders.user(0), "User(0)")
+        self.assertEqual(builders.user(9), "User(9)")
+
+    def test_user_rejects_bad_index(self):
+        for bad in (-1, 10, 100):  # outside [0, 9]
+            with self.assertRaises(CommandValidationError):
+                builders.user(bad)
+        for bad in (1.5, "1", True, None):  # float, str, bool, None all rejected
+            with self.assertRaises(CommandValidationError):
+                builders.user(bad)
+
+    def test_tool_wire(self):
+        self.assertEqual(builders.tool(1), "Tool(1)")
+        self.assertEqual(builders.tool(0), "Tool(0)")
+        self.assertEqual(builders.tool(9), "Tool(9)")
+
+    def test_tool_rejects_bad_index(self):
+        for bad in (-1, 10, 100):
+            with self.assertRaises(CommandValidationError):
+                builders.tool(bad)
+
+    def test_tool_rejects_non_integer(self):
+        for bad in (1.5, "1", True, None):  # float, str, bool, None all rejected
+            with self.assertRaises(CommandValidationError):
+                builders.tool(bad)
+
+    def test_set_user_wire(self):
+        self.assertEqual(
+            builders.set_user(1, (10, 10, 10, 0)),
+            "SetUser(1,{10.000000,10.000000,10.000000,0.000000})",
+        )
+
+    def test_set_user_rejects_bad_index(self):
+        for bad in (-1, 10, 1.5, True, "3"):
+            with self.assertRaises(CommandValidationError):
+                builders.set_user(bad, (10, 10, 10, 0))
+
+    def test_set_user_rejects_bad_table(self):
+        # _coord_table requires exactly 4 finite numbers.
+        for bad_table in ((10, 10, 10), (10, 10, 10, 0, 0), (10, 10, 10, float("nan"))):
+            with self.assertRaises(CommandValidationError):
+                builders.set_user(1, bad_table)
+
+    def test_set_tool_wire(self):
+        self.assertEqual(
+            builders.set_tool(1, (10, 10, 10, 0)),
+            "SetTool(1,{10.000000,10.000000,10.000000,0.000000})",
+        )
+
+    def test_set_tool_rejects_bad_index(self):
+        for bad in (-1, 10, 1.0, "1", True):
+            with self.assertRaises(CommandValidationError):
+                builders.set_tool(bad, (10, 10, 10, 0))
+
+    def test_set_tool_rejects_bad_table(self):
+        for bad in ((10, 10, 10), (10, 10, 10, 0, 0), (10, 10, 10, "r"),
+                    (10, 10, 10, float("nan")), (10, 10, 10, float("inf"))):
+            with self.assertRaises(CommandValidationError):
+                builders.set_tool(1, bad)
+
+    def test_calc_user_wire(self):
+        self.assertEqual(
+            builders.calc_user(1, 1, (10, 10, 10, 10)),
+            "CalcUser(1,1,{10.000000,10.000000,10.000000,10.000000})",
+        )
+
+    def test_calc_user_rejects_bad_index(self):
+        for bad in (-1, 10, 1.0, True, "1"):
+            with self.assertRaises(CommandValidationError):
+                builders.calc_user(bad, 1, (10, 10, 10, 10))
+
+    def test_calc_user_rejects_bad_matrix_direction(self):
+        for bad in (-1, 2, 1.0, True, "1"):
+            with self.assertRaises(CommandValidationError):
+                builders.calc_user(1, bad, (10, 10, 10, 10))
+
+    def test_calc_user_rejects_bad_table(self):
+        for bad in ((10, 10, 10), (10, 10, 10, 10, 10), ("x", 10, 10, 10), (10, 10, 10, float("inf"))):
+            with self.assertRaises(CommandValidationError):
+                builders.calc_user(1, 1, bad)
+
+    def test_calc_tool_wire(self):
+        self.assertEqual(
+            builders.calc_tool(1, 1, (10, 10, 10, 10)),
+            "CalcTool(1,1,{10.000000,10.000000,10.000000,10.000000})",
+        )
+
+    def test_calc_tool_rejects_bad_matrix_direction(self):
+        for bad in (-1, 2, 0.0, True, "0"):
+            with self.assertRaises(CommandValidationError):
+                builders.calc_tool(1, bad, (10, 10, 10, 10))
+
+    def test_positive_solution_wire(self):
+        self.assertEqual(
+            builders.positive_solution(0, 0, 90, 0, 1, 1),
+            "PositiveSolution(0.000000,0.000000,90.000000,0.000000,1,1)",
+        )
+
+    def test_positive_solution_rejects_bad_index(self):
+        # user / tool must be ints in [0, 9].
+        with self.assertRaises(CommandValidationError):
+            builders.positive_solution(0, 0, 90, 0, -1, 1)  # user < 0
+        with self.assertRaises(CommandValidationError):
+            builders.positive_solution(0, 0, 90, 0, 1, 10)  # tool > 9
+        with self.assertRaises(CommandValidationError):
+            builders.positive_solution(0, 0, 90, 0, 1.5, 1)  # user not int
+        with self.assertRaises(CommandValidationError):
+            builders.positive_solution(0, 0, 90, 0, True, 1)  # bool rejected
+
+    def test_positive_solution_rejects_bad_joint(self):
+        with self.assertRaises(CommandValidationError):
+            builders.positive_solution(200, 0, 90, 0, 1, 1)  # J1 > 160
+        with self.assertRaises(CommandValidationError):
+            builders.positive_solution(0, 90, 90, 0, 1, 1)  # J2 > 85
+        with self.assertRaises(CommandValidationError):
+            builders.positive_solution(0, 0, 120, 0, 1, 1)  # J3 > 105
+
+    def test_inverse_solution_wire(self):
+        self.assertEqual(
+            builders.inverse_solution(473, -141, 469, -180, 0, 0),
+            "InverseSolution(473.000000,-141.000000,469.000000,-180.000000,0,0)",
+        )
+        self.assertEqual(
+            builders.inverse_solution(473, -141, 469, -180, 0, 0, joint_near=(0, 0, 90, 0)),
+            "InverseSolution(473.000000,-141.000000,469.000000,-180.000000,0,0,1,"
+            "{0.000000,0.000000,90.000000,0.000000})",
+        )
+
+    def test_inverse_solution_rejects_bad_index(self):
+        for bad in (-1, 10, 1.0, "0", True):
+            with self.assertRaises(CommandValidationError):
+                builders.inverse_solution(473, -141, 469, -180, bad, 0)
+            with self.assertRaises(CommandValidationError):
+                builders.inverse_solution(473, -141, 469, -180, 0, bad)
+
+    def test_inverse_solution_rejects_non_number_cartesian(self):
+        for bad in ("x", None, float("nan"), float("inf"), True):
+            with self.assertRaises(CommandValidationError):
+                builders.inverse_solution(bad, 0, 0, 0, 0, 0)
+
+    def test_inverse_solution_rejects_bad_joint_near(self):
+        with self.assertRaises(CommandValidationError):  # wrong arity
+            builders.inverse_solution(473, -141, 469, -180, 0, 0, joint_near=(0, 0, 0))
+        with self.assertRaises(CommandValidationError):  # J2 > 85
+            builders.inverse_solution(473, -141, 469, -180, 0, 0, joint_near=(0, 90, 0, 0))
+        with self.assertRaises(CommandValidationError):  # non-number element
+            builders.inverse_solution(473, -141, 469, -180, 0, 0, joint_near=(0, 0, "x", 0))
+
+    def test_inverse_solution_does_not_validate_reachability(self):
+        # A far-away point still builds: reachability is not this layer's job.
+        self.assertEqual(
+            builders.inverse_solution(9999, 0, 0, 0, 0, 0),
+            "InverseSolution(9999.000000,0.000000,0.000000,0.000000,0,0)",
+        )
+
+    def test_get_pose_with_user_tool(self):
+        self.assertEqual(builders.get_pose(), "GetPose()")
+        self.assertEqual(builders.get_pose(1, 0), "GetPose(User=1,Tool=0)")
+
+    def test_get_pose_user_tool_all_or_nothing(self):
+        for bad in ((1, None), (None, 0)):
+            with self.assertRaises(CommandValidationError):
+                builders.get_pose(*bad)
+        with self.assertRaises(CommandValidationError):
+            builders.get_pose(10, 0)  # index out of [0, 9]
+
+
+class CoordinateClientWiringTests(unittest.TestCase):
+    """Coordinate/kinematics commands route through DashboardClient (29999)."""
+
+    def test_user_client_wiring(self):
+        conn = _FakeConnection("0,{},User(1)")
+        resp = DashboardClient(conn).user(1)
+        self.assertEqual(conn.sent, ["User(1)"])
+        self.assertTrue(resp.is_ok)
+
+    def test_tool_client_wiring(self):
+        conn = _FakeConnection("0,{},Tool(1)")
+        resp = DashboardClient(conn).tool(1)
+        self.assertEqual(conn.sent, ["Tool(1)"])
+        self.assertTrue(resp.is_ok)
+
+    def test_set_user_client_wiring(self):
+        conn = _FakeConnection("0,{},SetUser()")
+        resp = DashboardClient(conn).set_user(1, (10, 10, 10, 0))
+        self.assertEqual(conn.sent, ["SetUser(1,{10.000000,10.000000,10.000000,0.000000})"])
+        self.assertTrue(resp.is_ok)
+
+    def test_set_tool_client_wiring(self):
+        conn = _FakeConnection("0,{},SetTool()")
+        resp = DashboardClient(conn).set_tool(1, (10, 10, 10, 0))
+        self.assertEqual(conn.sent, ["SetTool(1,{10.000000,10.000000,10.000000,0.000000})"])
+        self.assertTrue(resp.is_ok)
+
+    def test_calc_user_client_wiring_tags_user_index(self):
+        conn = _FakeConnection("0,{197.23,-0.02,-30.26,2.67},CalcUser()")
+        result = DashboardClient(conn).calc_user(1, 1, (10, 10, 10, 10))
+        self.assertEqual(conn.sent, ["CalcUser(1,1,{10.000000,10.000000,10.000000,10.000000})"])
+        self.assertEqual((result.x, result.y, result.z, result.r), (197.23, -0.02, -30.26, 2.67))
+        self.assertEqual(result.user_index, 1)
+
+    def test_calc_tool_client_wiring_tags_tool_index(self):
+        conn = _FakeConnection("0,{1.0,2.0,3.0,4.0},CalcTool()")
+        result = DashboardClient(conn).calc_tool(2, 1, (10, 10, 10, 10))
+        self.assertEqual(conn.sent, ["CalcTool(2,1,{10.000000,10.000000,10.000000,10.000000})"])
+        self.assertEqual((result.x, result.y, result.z, result.r), (1.0, 2.0, 3.0, 4.0))
+        self.assertEqual(result.tool_index, 2)
+
+    def test_positive_solution_client_wiring(self):
+        conn = _FakeConnection("0,{1.0,2.0,3.0,4.0},PositiveSolution()")
+        result = DashboardClient(conn).positive_solution(0, 0, 90, 0, 1, 1)
+        self.assertEqual(conn.sent, ["PositiveSolution(0.000000,0.000000,90.000000,0.000000,1,1)"])
+        self.assertEqual((result.x, result.y, result.z, result.r), (1.0, 2.0, 3.0, 4.0))
+        self.assertEqual((result.user_index, result.tool_index), (1, 1))
+
+    def test_inverse_solution_client_wiring(self):
+        conn = _FakeConnection("0,{0.0,20.0,60.0,0.0},InverseSolution()")
+        result = DashboardClient(conn).inverse_solution(473, -141, 469, -180, 0, 0)
+        self.assertEqual(
+            conn.sent, ["InverseSolution(473.000000,-141.000000,469.000000,-180.000000,0,0)"]
+        )
+        self.assertEqual((result.j1, result.j2, result.j3, result.j4), (0.0, 20.0, 60.0, 0.0))
+
+    def test_get_pose_tags_requested_frame(self):
+        conn = _FakeConnection("0,{1.0,2.0,3.0,4.0},GetPose()")
+        result = DashboardClient(conn).get_pose(1, 0)
+        self.assertEqual(conn.sent, ["GetPose(User=1,Tool=0)"])
+        self.assertEqual((result.user_index, result.tool_index), (1, 0))
+
+
 if __name__ == "__main__":
     unittest.main()
