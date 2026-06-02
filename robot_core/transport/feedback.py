@@ -123,6 +123,12 @@ def feedback_dtype() -> "np.dtype":
             ("centerZ", np.float64, (1,)),
             ("user", np.float64, (6,)),
             ("tool", np.float64, (6,)),
+            # traceIndex / SixForceValue: the official PDF (offset 1296 / 1304)
+            # types these as float64, but the reference demo's MyType reads them
+            # as int64. Both are 8 bytes, so every downstream offset is identical
+            # either way; only the value interpretation differs. We keep the
+            # demo's int64 — per CLAUDE.md the demo is the authority on the
+            # on-the-wire byte format, and both fields are an index / reserved.
             ("traceIndex", np.int64),
             ("SixForceValue", np.int64, (6,)),
             ("TargetQuaternion", np.float64, (4,)),
@@ -154,6 +160,9 @@ class FeedbackFrame:
     robot_mode: int
     enable_status: int
     error_status: int
+    #: Raw ``ToolVectorActual`` (PDF offset 0624): the TCP Cartesian pose as 6
+    #: doubles. The firmware lays it out ``[X, Y, Z, Rx, Ry, Rz]``; the 4-axis
+    #: MG400 uses only the first four — see :attr:`pose`.
     tool_vector_actual: tuple[float, float, float, float, float, float]
     #: Actual joint angles (deg). The frame carries 6; for the 4-axis MG400 only
     #: indices 0..3 (J1..J4) are meaningful — see :attr:`joints`.
@@ -163,6 +172,25 @@ class FeedbackFrame:
     def joints(self) -> tuple[float, float, float, float]:
         """The four MG400 joint angles (J1..J4), in degrees."""
         return self.q_actual[0], self.q_actual[1], self.q_actual[2], self.q_actual[3]
+
+    @property
+    def pose(self) -> tuple[float, float, float, float]:
+        """The Cartesian TCP pose ``(x, y, z, r)`` in mm/deg.
+
+        Sourced from ``tool_vector_actual``, which the firmware emits as 6
+        doubles ``[X, Y, Z, Rx, Ry, Rz]``. For the 4-axis MG400 the single yaw
+        ``R`` lives in index 3 (the ``Rx`` slot); indices 4–5 stay 0. This is
+        the live byte-format truth from the reference demo (``ui.set_feed_joint``
+        binds the ``["X","Y","Z","R"]`` labels to ``tool_vector_actual[0..3]``)
+        and agrees with the 4-component ``{X,Y,Z,R}`` that dashboard ``GetPose``
+        returns. Cross-checking ``r`` against a live frame is a hardware follow-up.
+        """
+        return (
+            self.tool_vector_actual[0],
+            self.tool_vector_actual[1],
+            self.tool_vector_actual[2],
+            self.tool_vector_actual[3],
+        )
 
     @property
     def is_enabled(self) -> bool:
