@@ -60,6 +60,40 @@ class BuilderStringTests(unittest.TestCase):
             "JointMovJ(0.000000,0.000000,60.000000,0.000000)",
         )
 
+    def test_enable_robot_signatures_0_1_4(self):
+        # 0 / 1 / 4 params per official EnableRobot(load,centerX,centerY,centerZ).
+        self.assertEqual(builders.enable_robot(), "EnableRobot()")
+        self.assertEqual(builders.enable_robot(0.5), "EnableRobot(0.500000)")
+        self.assertEqual(
+            builders.enable_robot(0.5, 0, 0, 5.5),
+            "EnableRobot(0.500000,0.000000,0.000000,5.500000)",
+        )
+
+    def test_mov_optional_kwargs_keyvalue_format(self):
+        # Optional params appended as ",Key=value" in official order.
+        self.assertEqual(
+            builders.mov_l(100, 200, 50, 0, speed_l=60),
+            "MovL(100.000000,200.000000,50.000000,0.000000,SpeedL=60)",
+        )
+        self.assertEqual(
+            builders.mov_l(1, 2, 3, 4, user=1, tool=2, speed_l=60, acc_l=50, cp=10),
+            "MovL(1.000000,2.000000,3.000000,4.000000,User=1,Tool=2,SpeedL=60,AccL=50,CP=10)",
+        )
+        self.assertEqual(
+            builders.mov_j(1, 2, 3, 4, speed_j=80, acc_j=50),
+            "MovJ(1.000000,2.000000,3.000000,4.000000,SpeedJ=80,AccJ=50)",
+        )
+        self.assertEqual(
+            builders.joint_mov_j(0, 0, 60, 0, speed_j=60, acc_j=50, cp=0),
+            "JointMovJ(0.000000,0.000000,60.000000,0.000000,SpeedJ=60,AccJ=50,CP=0)",
+        )
+
+    def test_mov_without_kwargs_unchanged(self):
+        # Omitting all optional params yields the bare 4-arg form (back-compat).
+        self.assertEqual(
+            builders.mov_l(100, 200, 50, 0), "MovL(100.000000,200.000000,50.000000,0.000000)"
+        )
+
 
 class StaticValidationTests(unittest.TestCase):
     def test_speed_factor_out_of_range(self):
@@ -90,6 +124,37 @@ class StaticValidationTests(unittest.TestCase):
         self.assertEqual(
             builders.mov_l(9999, 0, 0, 0), "MovL(9999.000000,0.000000,0.000000,0.000000)"
         )
+
+    def test_enable_robot_rejects_invalid_param_counts(self):
+        # Firmware accepts only 0/1/4: partial centre-of-mass is rejected.
+        with self.assertRaises(CommandValidationError):
+            builders.enable_robot(0.5, 0)  # 2 params
+        with self.assertRaises(CommandValidationError):
+            builders.enable_robot(0.5, 0, 0)  # 3 params
+        with self.assertRaises(CommandValidationError):
+            builders.enable_robot(center_x=0, center_y=0, center_z=0)  # centres w/o load
+
+    def test_enable_robot_rejects_out_of_range(self):
+        with self.assertRaises(CommandValidationError):
+            builders.enable_robot(-0.1)  # negative load
+        with self.assertRaises(CommandValidationError):
+            builders.enable_robot(0.5, 600, 0, 0)  # centerX > 500
+        with self.assertRaises(CommandValidationError):
+            builders.enable_robot(0.5, 0, -501, 0)  # centerY < -500
+
+    def test_mov_optional_kwargs_out_of_range(self):
+        with self.assertRaises(CommandValidationError):
+            builders.mov_l(0, 0, 0, 0, speed_l=0)  # ratio < 1
+        with self.assertRaises(CommandValidationError):
+            builders.mov_l(0, 0, 0, 0, acc_l=101)  # ratio > 100
+        with self.assertRaises(CommandValidationError):
+            builders.mov_l(0, 0, 0, 0, cp=101)  # CP > 100
+        with self.assertRaises(CommandValidationError):
+            builders.mov_l(0, 0, 0, 0, user=10)  # index > 9
+        with self.assertRaises(CommandValidationError):
+            builders.mov_j(0, 0, 0, 0, speed_j=1.5)  # ratio must be int
+        with self.assertRaises(CommandValidationError):
+            builders.joint_mov_j(0, 0, 0, 0, cp=-1)  # CP < 0
 
 
 class ResponseParsingTests(unittest.TestCase):
@@ -252,6 +317,30 @@ class ClientWiringTests(unittest.TestCase):
         # Channel separation: Sync drains the move queue (30003), not a dashboard cmd.
         self.assertTrue(hasattr(MoveClient, "sync"))
         self.assertFalse(hasattr(DashboardClient, "sync"))
+
+    def test_dashboard_enable_robot_with_load_wiring(self):
+        conn = _FakeConnection("0,{},EnableRobot()")
+        DashboardClient(conn).enable_robot(0.5)
+        self.assertEqual(conn.sent, ["EnableRobot(0.500000)"])
+
+    def test_dashboard_enable_robot_no_args_wiring(self):
+        conn = _FakeConnection("0,{},EnableRobot()")
+        DashboardClient(conn).enable_robot()
+        self.assertEqual(conn.sent, ["EnableRobot()"])
+
+    def test_move_client_mov_l_kwargs_wiring(self):
+        conn = _FakeConnection("0,{},MovL()")
+        MoveClient(conn).mov_l(1, 2, 3, 4, speed_l=60, cp=10)
+        self.assertEqual(
+            conn.sent, ["MovL(1.000000,2.000000,3.000000,4.000000,SpeedL=60,CP=10)"]
+        )
+
+    def test_move_client_joint_mov_j_kwargs_wiring(self):
+        conn = _FakeConnection("0,{},JointMovJ()")
+        MoveClient(conn).joint_mov_j(0, 0, 60, 0, speed_j=60, acc_j=50)
+        self.assertEqual(
+            conn.sent, ["JointMovJ(0.000000,0.000000,60.000000,0.000000,SpeedJ=60,AccJ=50)"]
+        )
 
 
 if __name__ == "__main__":

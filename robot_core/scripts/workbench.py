@@ -234,8 +234,10 @@ class Workbench:
         await update_task
         print()  # New line after live mode
 
-    async def cmd_enable(self):
-        """Enable robot via dashboard.
+    async def cmd_enable(self, args: str = ""):
+        """Enable robot via dashboard, optionally with a payload load (kg).
+
+        Usage: ``enable`` or ``enable <load_kg>`` (e.g. ``enable 0.5``).
 
         Pre-checks feedback state: if the controller is already enabled, skips
         sending EnableRobot() because re-issuing it on this firmware (MG400
@@ -247,6 +249,14 @@ class Workbench:
             print("Dashboard not connected")
             return
 
+        load = None
+        if args.strip():
+            try:
+                load = float(args.split()[0])
+            except ValueError:
+                print(f"enable: invalid load {args.strip()!r} — expected kg, e.g. `enable 0.5`")
+                return
+
         snap = self.state.snapshot if self.state is not None else None
         if snap is not None and snap.is_enabled:
             print(
@@ -255,9 +265,10 @@ class Workbench:
             )
             return
 
-        print("Sending: EnableRobot()")
+        cmd_str = "EnableRobot()" if load is None else f"EnableRobot({load})"
+        print(f"Sending: {cmd_str}")
         try:
-            response = self.dashboard.enable_robot()
+            response = self.dashboard.enable_robot(load)
             print(f"Received: {response.raw}")
             if response.error_id == 0:
                 print("Robot enabled successfully")
@@ -679,7 +690,7 @@ class Workbench:
                     print("Commands:")
                     print("  status       - Show current state")
                     print("  live         - Live update mode")
-                    print("  enable       - Enable robot")
+                    print("  enable [load] - Enable robot (optional payload kg, e.g. enable 0.5)")
                     print("  disable      - Disable robot")
                     print("  clear        - Clear errors")
                     print("  speed <pct>  - Set global speed factor 1-100% (T7B: try 20)")
@@ -699,7 +710,7 @@ class Workbench:
                 elif cmd == "live":
                     await self.cmd_live()
                 elif cmd == "enable":
-                    await self.cmd_enable()
+                    await self.cmd_enable(args)
                 elif cmd == "disable":
                     await self.cmd_disable()
                 elif cmd == "clear":
