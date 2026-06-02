@@ -71,6 +71,17 @@ def _require_joint(joint: str, value: object) -> float:
     return number
 
 
+def _require_number_in_range(
+    name: str, value: object, low: float, high: float
+) -> float:
+    number = _require_number(name, value)
+    if not (low <= number <= high):
+        raise CommandValidationError(
+            f"{name} must be in [{low}, {high}], got {number}"
+        )
+    return number
+
+
 def _coord_table(name: str, table: object) -> str:
     """Validate a coordinate-system table and format the ``{x,y,z,r}`` literal.
 
@@ -94,10 +105,53 @@ def _coord_table(name: str, table: object) -> str:
 
 # -- Dashboard commands (port 29999) ---------------------------------------
 
-def enable_robot() -> str:
-    """Enable (power on) the robot. (Optional load/CoM params: TODO — semantics
-    not documented in the reference; add once confirmed.)"""
-    return "EnableRobot()"
+def enable_robot(
+    load: "float | None" = None,
+    center_x: "float | None" = None,
+    center_y: "float | None" = None,
+    center_z: "float | None" = None,
+) -> str:
+    """Enable (power on) the robot, optionally declaring the end-effector load.
+
+    Official prototype: ``EnableRobot(load,centerX,centerY,centerZ)`` with **0, 1
+    or 4** parameters (PDF lines 200/230):
+
+    * ``EnableRobot()`` — enable without setting load/centre of mass.
+    * ``EnableRobot(load)`` — declare payload ``load`` only (kg).
+    * ``EnableRobot(load,centerX,centerY,centerZ)`` — payload + centre-of-mass
+      eccentricity (mm). Needed for accurate dynamics with the 500 g eccentric
+      grasp the platform targets.
+
+    ``load`` is kg (must be ≥ 0; the per-model upper bound is the model/safety
+    layer's concern, not enforced here). ``center_*`` are mm in [-500, 500].
+    Any other count (e.g. load + a single centre value) is rejected — the
+    firmware only accepts 0/1/4.
+    """
+    centres = (center_x, center_y, center_z)
+    if load is None:
+        if any(c is not None for c in centres):
+            raise CommandValidationError(
+                "EnableRobot centre-of-mass params require load (use 4 params)"
+            )
+        return "EnableRobot()"
+
+    vload = _require_number("EnableRobot.load", load)
+    if vload < 0:
+        raise CommandValidationError(f"EnableRobot.load must be >= 0 kg, got {vload}")
+
+    if all(c is None for c in centres):
+        return f"EnableRobot({vload:f})"
+
+    if any(c is None for c in centres):
+        raise CommandValidationError(
+            "EnableRobot takes 0, 1 (load), or 4 (load,cx,cy,cz) params — "
+            "centre-of-mass must be all three or none"
+        )
+
+    vx = _require_number_in_range("EnableRobot.centerX", center_x, -500, 500)
+    vy = _require_number_in_range("EnableRobot.centerY", center_y, -500, 500)
+    vz = _require_number_in_range("EnableRobot.centerZ", center_z, -500, 500)
+    return f"EnableRobot({vload:f},{vx:f},{vy:f},{vz:f})"
 
 
 def disable_robot() -> str:
@@ -190,24 +244,123 @@ def stop_drag() -> str:
 
 # -- Move commands (port 30003) --------------------------------------------
 
-def mov_l(x: float, y: float, z: float, r: float) -> str:
+def mov_l(
+    x: float,
+    y: float,
+    z: float,
+    r: float,
+    *,
+    user: "int | None" = None,
+    tool: "int | None" = None,
+    speed_l: "int | None" = None,
+    acc_l: "int | None" = None,
+    cp: "int | None" = None,
+) -> str:
     """Linear move to Cartesian (x, y, z, r). Type-checked only; reachability is
-    the safety/kinematics layer's job, not validated here."""
-    return _format_cartesian("MovL", x, y, z, r)
+    the safety/kinematics layer's job, not validated here.
+
+    Optional per-command params (PDF: ``MovL(X,Y,Z,R,User=,Tool=,SpeedL=,AccL=,
+    CP=)``): ``user``/``tool`` are calibrated coordinate-system indices [0, 9];
+    ``speed_l``/``acc_l`` are velocity/acceleration ratios [1, 100]; ``cp`` is
+    the continuous-path blend ratio [0, 100]. Omitted params fall back to the
+    controller's global settings.
+    """
+    vx = _require_number("MovL.x", x)
+    vy = _require_number("MovL.y", y)
+    vz = _require_number("MovL.z", z)
+    vr = _require_number("MovL.r", r)
+    opts = _move_options(
+        "MovL", user=user, tool=tool, speed_key="SpeedL", speed=speed_l,
+        acc_key="AccL", acc=acc_l, cp=cp,
+    )
+    return f"MovL({vx:f},{vy:f},{vz:f},{vr:f}{opts})"
 
 
-def mov_j(x: float, y: float, z: float, r: float) -> str:
-    """Joint-interpolated move to Cartesian (x, y, z, r). See :func:`mov_l`."""
-    return _format_cartesian("MovJ", x, y, z, r)
+def mov_j(
+    x: float,
+    y: float,
+    z: float,
+    r: float,
+    *,
+    user: "int | None" = None,
+    tool: "int | None" = None,
+    speed_j: "int | None" = None,
+    acc_j: "int | None" = None,
+    cp: "int | None" = None,
+) -> str:
+    """Joint-interpolated move to Cartesian (x, y, z, r). See :func:`mov_l`;
+    MovJ uses ``SpeedJ``/``AccJ`` ratios [1, 100] instead of SpeedL/AccL."""
+    vx = _require_number("MovJ.x", x)
+    vy = _require_number("MovJ.y", y)
+    vz = _require_number("MovJ.z", z)
+    vr = _require_number("MovJ.r", r)
+    opts = _move_options(
+        "MovJ", user=user, tool=tool, speed_key="SpeedJ", speed=speed_j,
+        acc_key="AccJ", acc=acc_j, cp=cp,
+    )
+    return f"MovJ({vx:f},{vy:f},{vz:f},{vr:f}{opts})"
 
 
-def joint_mov_j(j1: float, j2: float, j3: float, j4: float) -> str:
-    """Joint move to (J1, J2, J3, J4) deg, each validated against its range."""
+def joint_mov_j(
+    j1: float,
+    j2: float,
+    j3: float,
+    j4: float,
+    *,
+    speed_j: "int | None" = None,
+    acc_j: "int | None" = None,
+    cp: "int | None" = None,
+) -> str:
+    """Joint move to (J1, J2, J3, J4) deg, each validated against its range.
+
+    Optional params (PDF: ``JointMovJ(J1,J2,J3,J4,SpeedJ=,AccJ=,CP=)``):
+    ``speed_j``/``acc_j`` ratios [1, 100], ``cp`` blend ratio [0, 100]. Unlike
+    MovL/MovJ, JointMovJ takes no User/Tool (joint-space target).
+    """
     a = _require_joint("J1", j1)
     b = _require_joint("J2", j2)
     c = _require_joint("J3", j3)
     d = _require_joint("J4", j4)
-    return f"JointMovJ({a:f},{b:f},{c:f},{d:f})"
+    opts = _move_options(
+        "JointMovJ", user=None, tool=None, speed_key="SpeedJ", speed=speed_j,
+        acc_key="AccJ", acc=acc_j, cp=cp,
+    )
+    return f"JointMovJ({a:f},{b:f},{c:f},{d:f}{opts})"
+
+
+def _move_options(
+    name: str,
+    *,
+    user: "int | None",
+    tool: "int | None",
+    speed_key: str,
+    speed: "int | None",
+    acc_key: str,
+    acc: "int | None",
+    cp: "int | None",
+) -> str:
+    """Build the optional ``,Key=value`` suffix for a move command.
+
+    Emitted in the official order (User, Tool, Speed*, Acc*, CP); omitted params
+    contribute nothing. Returns ``""`` when all are None, so the caller can
+    splice it straight before the closing paren.
+    """
+    parts: list[str] = []
+    if user is not None:
+        parts.append(f"User={_require_int_in_range(f'{name}.User', user, 0, 9)}")
+    if tool is not None:
+        parts.append(f"Tool={_require_int_in_range(f'{name}.Tool', tool, 0, 9)}")
+    if speed is not None:
+        parts.append(
+            f"{speed_key}={_require_int_in_range(f'{name}.{speed_key}', speed, 1, 100)}"
+        )
+    if acc is not None:
+        parts.append(
+            f"{acc_key}={_require_int_in_range(f'{name}.{acc_key}', acc, 1, 100)}"
+        )
+    if cp is not None:
+        parts.append(f"CP={_require_int_in_range(f'{name}.CP', cp, 0, 100)}")
+    return "".join(f",{p}" for p in parts)
 
 
 def sync() -> str:
@@ -218,14 +371,6 @@ def sync() -> str:
     position, instead of sleeping. Reference: ``DobotApiMove.Sync``.
     """
     return "Sync()"
-
-
-def _format_cartesian(name: str, x: object, y: object, z: object, r: object) -> str:
-    vx = _require_number(f"{name}.x", x)
-    vy = _require_number(f"{name}.y", y)
-    vz = _require_number(f"{name}.z", z)
-    vr = _require_number(f"{name}.r", r)
-    return f"{name}({vx:f},{vy:f},{vz:f},{vr:f})"
 
 
 # -- Coordinate-system & kinematics commands (dashboard 29999) -------------

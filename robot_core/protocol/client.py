@@ -50,9 +50,20 @@ class DashboardClient(_CommandChannel):
     # Enabling can take a few seconds to energise.
     DEFAULT_ENABLE_TIMEOUT_S = 15.0
 
-    def enable_robot(self, *, timeout_s: Optional[float] = None) -> DashboardResponse:
+    def enable_robot(
+        self,
+        load: Optional[float] = None,
+        center_x: Optional[float] = None,
+        center_y: Optional[float] = None,
+        center_z: Optional[float] = None,
+        *,
+        timeout_s: Optional[float] = None,
+    ) -> DashboardResponse:
+        """Enable the robot, optionally declaring payload ``load`` (kg) and
+        centre-of-mass eccentricity (mm). See :func:`builders.enable_robot` for
+        the 0/1/4-parameter rules."""
         return self._send(
-            builders.enable_robot(),
+            builders.enable_robot(load, center_x, center_y, center_z),
             timeout_s=timeout_s if timeout_s is not None else self.DEFAULT_ENABLE_TIMEOUT_S,
         )
 
@@ -179,14 +190,58 @@ class DashboardClient(_CommandChannel):
 class MoveClient(_CommandChannel):
     """Move (port 30003) motion commands. Replies acknowledge enqueue only."""
 
-    def mov_l(self, x: float, y: float, z: float, r: float) -> DashboardResponse:
-        return self._send(builders.mov_l(x, y, z, r))
+    def mov_l(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        r: float,
+        *,
+        user: Optional[int] = None,
+        tool: Optional[int] = None,
+        speed_l: Optional[int] = None,
+        acc_l: Optional[int] = None,
+        cp: Optional[int] = None,
+    ) -> DashboardResponse:
+        return self._send(
+            builders.mov_l(
+                x, y, z, r, user=user, tool=tool, speed_l=speed_l, acc_l=acc_l, cp=cp
+            )
+        )
 
-    def mov_j(self, x: float, y: float, z: float, r: float) -> DashboardResponse:
-        return self._send(builders.mov_j(x, y, z, r))
+    def mov_j(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        r: float,
+        *,
+        user: Optional[int] = None,
+        tool: Optional[int] = None,
+        speed_j: Optional[int] = None,
+        acc_j: Optional[int] = None,
+        cp: Optional[int] = None,
+    ) -> DashboardResponse:
+        return self._send(
+            builders.mov_j(
+                x, y, z, r, user=user, tool=tool, speed_j=speed_j, acc_j=acc_j, cp=cp
+            )
+        )
 
-    def joint_mov_j(self, j1: float, j2: float, j3: float, j4: float) -> DashboardResponse:
-        return self._send(builders.joint_mov_j(j1, j2, j3, j4))
+    def joint_mov_j(
+        self,
+        j1: float,
+        j2: float,
+        j3: float,
+        j4: float,
+        *,
+        speed_j: Optional[int] = None,
+        acc_j: Optional[int] = None,
+        cp: Optional[int] = None,
+    ) -> DashboardResponse:
+        return self._send(
+            builders.joint_mov_j(j1, j2, j3, j4, speed_j=speed_j, acc_j=acc_j, cp=cp)
+        )
 
     def sync(self, *, timeout_s: Optional[float] = None) -> DashboardResponse:
         """Block until the move queue drains. The reply returns only after all

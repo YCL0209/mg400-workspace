@@ -344,6 +344,29 @@ T7B 採點 5 個 J2 樣本（−10、−5、0、+5、+20）用「push J3 直到 
 
 下次 session 可選擇性補採 +30 / +40 驗證線性是否延伸到大 J2，沒採也不會有保護缺口（polygon 已涵蓋全範圍）。
 
+### 20. **📋 官方 SDK PDF 全面審計 — 6 大類差異（2026-06-02）**
+
+第三方 agent 對齊《TCP/IP 远程控制接口文档（4軸）_20240419》逐條審計，產出 `docs/OFFICIAL_VS_PROJECT_DIFF.md`。**權威優先序立規**：官方 PDF > demo wire format > 我們本地文件（CLAUDE.md 第一規則段升級）。
+
+**A. 核心協定已對齊 ✅**：三埠、回應格式、`;` 規則（commit 3d623c1 修法後）、feedback 1440-byte magic、RobotMode 字典、SpeedFactor 值域、笛卡爾 `{x,y,z,r}`、指令大小寫不敏感、錯誤碼 -1/-10000/-20000/-3xxx/-4xxx。
+
+**B. 缺口（按優先序）**：
+- **B6**（最優先）：feedback 1440-byte 欄位**未逐欄對官方 offset 表**。實機 magic + FK 對齊 ⇒ 我們用到的欄位 offset 對；但官方 `ToolVectorActual` 是 6 分量（x,y,z,Rx,Ry,Rz），4 軸機型的 `r` 對應哪個分量待確認。建議做一次完整 dtype↔官方表核對 + unit test 釘住偏移。
+- **B1**：`EnableRobot(load, cx, cy, cz)` 支援 0/1/4 簽名，我們只有 0。500g 偏心負載需要這個做動力學補償。
+- **B2**：`MovL/MovJ(...)` 缺 `SpeedL/AccL/User/Tool/CP` 可選 kwargs。目前只能吃全局速率，無法逐指令客製。
+- **B3**：`JointMovJ(...)` 缺 `SpeedJ/AccJ/CP`。
+- **B4**：缺指令——`User/Tool/SetUser/SetTool/CalcUser/CalcTool`（座標系，待 Phase 3.2）、`PositiveSolution/InverseSolution`（控制器算 FK/IK 供交叉驗證）、`Arc/Circle/MovLIO/MovJIO`（待 Phase 5 motion）、`DO` 等 IO（待 controller phase）。
+- **B5**（無影響）：feedback 30005（200ms）/ 30006（可配置）兩埠未用，目前 30004 足夠。
+
+**C. 文件對齊**：
+- C1：worktree `COMPARISON_REPORT.md`（已搬到 `docs/REFERENCE_AUDIT_2026-06-01.md`）的 `;` 段已過時——`;` 修法早就 ship 在 commit `3d623c1`。已加 stale-warning header 註明。
+- C2：CLAUDE.md `;` 規則段現與官方一致，無需改。
+- C3：findings 16/17 對 `-10000` 的「過載使用」註記跟官方「命令不存在」定義不衝突——標明這是我們實機補出的擴充。
+
+**Lesson**：原廠 SDK PDF 是 contract，韌體是 Dobot 寫的——我們是 client。再強的實機觀察也不能凌駕 PDF（除非 PDF 漏記某條真實限制，如 finding 19 的 J3−J2 coupling）。CLAUDE.md 升級的三級權威排序就是把這條紀律寫進規範。
+
+**Next action**：NEXT_TASKS 加 T13-T18 把 B 系列拆成可執行 task，按優先序排程。
+
 ---
 
 ## FK 校驗資料(10 筆真實配對,法蘭中心,mm/deg)
