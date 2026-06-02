@@ -367,6 +367,30 @@ T7B 採點 5 個 J2 樣本（−10、−5、0、+5、+20）用「push J3 直到 
 
 **Next action**：NEXT_TASKS 加 T13-T18 把 B 系列拆成可執行 task，按優先序排程。
 
+### 21. **⚙️ EnableRobot load 參數實機驗證:phantom load → 馬達嗡聲;對應 load → J4 剛性增強(2026-06-02)**
+
+H3 硬體驗證（PR #21 / B1 簽名）實測 `EnableRobot(load, cx, cy, cz)` 三變體：
+
+**0 參數**（`enable`，裸法蘭）：✅ controller 接受、無動力學補償、安靜。
+
+**1 參數，load=0.5kg、無實際負載**（`enable 0.5`）：
+- controller 接受 → `Received: 0,{},EnableRobot(0.500000)`
+- **馬達持續嗡聲**（1b + 2b：連續、enable 後一直響到 disable）
+- 機制：宣告 0.5kg 重力 → 動力學補償多算 0.5kg → 馬達持續輸出對抗虛擬重力的小扭矩 → phantom load whine
+
+**1 參數，load=0.75kg、有實際對應負載**（`enable 0.75` + 約 0.75kg 法蘭負載）：
+- ✅ controller 接受、**無嗡聲**（補償對齊現實）
+- ✅ **J4 剛性明顯變硬**（手感）——controller 預期有負載 → 抬高 J4 servo hold gain → 對抗預期的重力扭矩 → 維持位置的剛性增強
+
+**4 參數**（`enable 0.5 0 0 30`）：**workbench parser bug**——`cmd_enable` 用 `args.split()[0]` 只取第一個值，後 3 個（cx, cy, cz）被丟掉。PR #21 builder/client 簽名沒問題，只是 workbench verb 包裝不完整。本 PR 修。
+
+**這條 finding 證明了**：
+1. **動力學補償是真的有效運作**——load 宣告直接改 servo 增益策略，不是僅當 metadata
+2. **參數對齊現實很重要**——錯的 load 宣告造成 motor 持續 phantom-fight，長期不好（額外熱、磨耗）
+3. **`r` 軸（J4）對 load 補償特別敏感**——可作為「load 宣告是否生效」的快速感官檢查
+
+**對 phase 5/6 motion 的影響**：抓取場景必須**每換工件就 disable + EnableRobot(load, cx, cy, cz) 重設**正確負載 + 質心，否則 MovL/MovJ 動態軌跡計算會偏差（補償用錯重力導致 overshoot / 抖動）。Phase 6 controller `move_to(...)` API 之前要有 `set_payload(kg, cx, cy, cz)` 方法統一管理。
+
 ---
 
 ## FK 校驗資料(10 筆真實配對,法蘭中心,mm/deg)
