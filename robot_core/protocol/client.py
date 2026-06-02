@@ -99,19 +99,18 @@ class DashboardClient(_CommandChannel):
     def robot_mode(self) -> DashboardResponse:
         return self._send(builders.robot_mode())
 
-    def get_pose(
-        self, user: Optional[int] = None, tool: Optional[int] = None
-    ) -> PoseResult:
-        """Query the current Cartesian pose as a typed :class:`PoseResult`.
+    def get_pose(self) -> PoseResult:
+        """Query the current Cartesian pose in the active global frame.
 
-        Optional ``user``/``tool`` coordinate-system indices [0, 9] select a
-        calibrated frame; they are recorded on the result (the reply does not
-        echo them)."""
-        return parse_pose(
-            self._send(builders.get_pose(user, tool)),
-            user_index=user,
-            tool_index=tool,
-        )
+        Returns a :class:`PoseResult` with ``user_index`` / ``tool_index`` left
+        as ``None`` because the reply does not echo a frame and the firmware
+        does not let the caller select one per call (PROGRESS finding 22 —
+        ``GetPose(User=,Tool=)`` is rejected by the MG400 1.7.0.0 firmware on
+        TCP/二次開發 mode). To view the pose in a calibrated User/Tool frame,
+        apply the offset client-side via ``robot_core.kinematics.transform``
+        (Phase 6.1) — the controller will not do it for us over this channel.
+        """
+        return parse_pose(self._send(builders.get_pose()))
 
     def get_angle(self) -> AngleResult:
         """Query the current joint angles as a typed :class:`AngleResult`."""

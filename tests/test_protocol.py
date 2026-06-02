@@ -517,16 +517,12 @@ class CoordinateBuilderTests(unittest.TestCase):
             "InverseSolution(9999.000000,0.000000,0.000000,0.000000,0,0)",
         )
 
-    def test_get_pose_with_user_tool(self):
+    def test_get_pose_no_args(self):
+        # `GetPose(User=,Tool=)` was removed after hardware proved firmware
+        # 1.7.0.0 rejects keyword syntax with -30001 and silently ignores
+        # positional args (returns base pose regardless). See PROGRESS
+        # finding 22 — per-frame query is a client-side transform job now.
         self.assertEqual(builders.get_pose(), "GetPose()")
-        self.assertEqual(builders.get_pose(1, 0), "GetPose(User=1,Tool=0)")
-
-    def test_get_pose_user_tool_all_or_nothing(self):
-        for bad in ((1, None), (None, 0)):
-            with self.assertRaises(CommandValidationError):
-                builders.get_pose(*bad)
-        with self.assertRaises(CommandValidationError):
-            builders.get_pose(10, 0)  # index out of [0, 9]
 
 
 class CoordinateClientWiringTests(unittest.TestCase):
@@ -585,11 +581,17 @@ class CoordinateClientWiringTests(unittest.TestCase):
         )
         self.assertEqual((result.j1, result.j2, result.j3, result.j4), (0.0, 20.0, 60.0, 0.0))
 
-    def test_get_pose_tags_requested_frame(self):
+    def test_get_pose_no_args(self):
+        # `DashboardClient.get_pose()` is no-args after the hardware-verified
+        # firmware 1.7.0.0 limitation; user_index/tool_index stay None on the
+        # result. Per-frame queries are a client-side transform problem now
+        # (PROGRESS finding 22 + Phase 6.1 transform.py).
         conn = _FakeConnection("0,{1.0,2.0,3.0,4.0},GetPose()")
-        result = DashboardClient(conn).get_pose(1, 0)
-        self.assertEqual(conn.sent, ["GetPose(User=1,Tool=0)"])
-        self.assertEqual((result.user_index, result.tool_index), (1, 0))
+        result = DashboardClient(conn).get_pose()
+        self.assertEqual(conn.sent, ["GetPose()"])
+        self.assertEqual((result.x, result.y, result.z, result.r), (1.0, 2.0, 3.0, 4.0))
+        self.assertIsNone(result.user_index)
+        self.assertIsNone(result.tool_index)
 
 
 if __name__ == "__main__":
