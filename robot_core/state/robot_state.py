@@ -196,3 +196,46 @@ class RobotState:
             return await asyncio.wait_for(future, timeout)
         finally:
             unsubscribe()
+
+    async def wait_for(
+        self,
+        predicate: Callable[[RobotStateSnapshot], bool],
+        *,
+        timeout: Optional[float] = None,
+    ) -> RobotStateSnapshot:
+        """Await the first snapshot for which ``predicate`` returns truthy.
+
+        Resolves instantly against the current snapshot if it already satisfies
+        the predicate (so callers can express "wait until mode==5" without
+        worrying whether they got there before subscribing). Otherwise subscribes
+        and resolves on the next edge whose snapshot satisfies the predicate.
+
+        ``predicate`` runs inside :meth:`update`'s notify path — keep it pure
+        and fast. Exceptions raised by it propagate out of ``wait_for`` (the
+        subscriber is unsubscribed first, so no zombie callback is left).
+
+        Raises :class:`asyncio.TimeoutError` if ``timeout`` elapses first.
+        """
+        current = self._snapshot
+        if current is not None and predicate(current):
+            return current
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+
+        def _check(snapshot: RobotStateSnapshot, changed: "frozenset[str]") -> None:
+            if future.done():
+                return
+            try:
+                hit = predicate(snapshot)
+            except Exception as exc:  # noqa: BLE001
+                future.set_exception(exc)
+                return
+            if hit:
+                future.set_result(snapshot)
+
+        unsubscribe = self.subscribe(_check)
+        try:
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            unsubscribe()
