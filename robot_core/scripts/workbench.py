@@ -28,6 +28,8 @@ Commands at mg400> prompt:
     stop_drag         - Leave software drag/teach mode
     probe_start <J2>  - Auto-position to (0, J2, 46, 0) for T7B coupling probe
     jog <axis> <±deg> - Step single joint (e.g. jog j3 +1, jog j2 -5)
+    move_l <x> <y> <z> <r> [speed] - Linear (Cartesian) move, safety-gated
+    joint_mov_j <j1> <j2> <j3> <j4> [speed] - Absolute joint move, safety-gated
     mode              - Query robot mode
     version           - Query version info
     sing?             - Show singularity distances
@@ -580,6 +582,127 @@ class Workbench:
         target = (joints[0], joints[1], joints[2], joints[3])
         await self._arm_joint_move(target, f"jog {axis} {delta:+.2f}")
 
+    def _check_motion_preconditions(self, op_desc: str) -> Optional[RobotStateSnapshot]:
+        """Common pre-flight for cmd_move_l / cmd_joint_mov_j.
+
+        Verifies move channel up, feedback present, robot enabled and in mode 5
+        ENABLE, and no active error. Returns the snapshot on success, ``None``
+        (after printing the reason) on any failure. Safety gate check is a
+        separate stage in the caller — this layer is the cheap fail-fast.
+        """
+        if not self.move:
+            print(f"{op_desc}: move channel not connected (30003) — refusing")
+            return None
+        snap = self.state.snapshot
+        if snap is None:
+            print(f"{op_desc}: no feedback yet — cannot pre-check, refusing")
+            return None
+        if not snap.is_enabled:
+            print(
+                f"{op_desc}: robot not enabled (mode={snap.robot_mode}) — "
+                f"run `enable` first"
+            )
+            return None
+        if snap.robot_mode != ROBOT_MODE_ENABLE:
+            print(
+                f"{op_desc}: robot mode={snap.robot_mode}, "
+                f"expected {ROBOT_MODE_ENABLE} (ENABLE) — refusing"
+            )
+            return None
+        if snap.has_error:
+            print(
+                f"{op_desc}: active error (error_status={snap.error_status}) — "
+                f"run `clear` first"
+            )
+            return None
+        return snap
+
+    async def cmd_move_l(self, args: str):
+        """Linear (Cartesian) move to (x, y, z, r). Safety-gated, event-driven completion.
+
+        Usage:
+            move_l <x> <y> <z> <r>             — default global speed (SpeedFactor)
+            move_l <x> <y> <z> <r> <speed_pct> — per-command SpeedL override (1-100)
+        """
+        parts = args.split()
+        if len(parts) not in (4, 5):
+            print(
+                f"move_l: takes 4 or 5 args (got {len(parts)}). "
+                "Usage: move_l <x> <y> <z> <r> [speed_pct]"
+            )
+            return
+        try:
+            x, y, z, r = (float(p) for p in parts[:4])
+        except ValueError:
+            print(f"move_l: non-numeric coord in {args.strip()!r}")
+            return
+        speed: Optional[int] = None
+        if len(parts) == 5:
+            try:
+                speed = int(parts[4])
+            except ValueError:
+                print(f"move_l: non-integer speed in {parts[4]!r}")
+                return
+            if not (1 <= speed <= 100):
+                print(f"move_l: speed {speed} out of range [1, 100] — refusing")
+                return
+
+        snap = self._check_motion_preconditions("move_l")
+        if snap is None:
+            return
+
+        # T8.2 skeleton: parse + pre-check done. Safety gate (T8.3) and motion
+        # send + sidecar wait (T8.4) wired in subsequent commits.
+        print(
+            f"move_l: target=({x:.1f},{y:.1f},{z:.1f},{r:.1f}) "
+            f"speed={speed if speed is not None else 'default'} "
+            f"[skeleton — safety + motion not wired yet]"
+        )
+
+    async def cmd_joint_mov_j(self, args: str):
+        """Absolute joint move via JointMovJ. Safety-gated, event-driven completion.
+
+        Usage:
+            joint_mov_j <j1> <j2> <j3> <j4>             — default speed
+            joint_mov_j <j1> <j2> <j3> <j4> <speed_pct> — per-command SpeedJ (1-100)
+
+        For returning to a safe pose / factory pose between moves; the workspace
+        annulus check on Cartesian targets does not apply, but the J2/J3
+        coupling polygon (finding 19) is checked via FK→pose→gate in T8.3.
+        """
+        parts = args.split()
+        if len(parts) not in (4, 5):
+            print(
+                f"joint_mov_j: takes 4 or 5 args (got {len(parts)}). "
+                "Usage: joint_mov_j <j1> <j2> <j3> <j4> [speed_pct]"
+            )
+            return
+        try:
+            j1, j2, j3, j4 = (float(p) for p in parts[:4])
+        except ValueError:
+            print(f"joint_mov_j: non-numeric joint in {args.strip()!r}")
+            return
+        speed: Optional[int] = None
+        if len(parts) == 5:
+            try:
+                speed = int(parts[4])
+            except ValueError:
+                print(f"joint_mov_j: non-integer speed in {parts[4]!r}")
+                return
+            if not (1 <= speed <= 100):
+                print(f"joint_mov_j: speed {speed} out of range [1, 100] — refusing")
+                return
+
+        snap = self._check_motion_preconditions("joint_mov_j")
+        if snap is None:
+            return
+
+        print(
+            f"joint_mov_j: target=({j1:.1f},{j2:.1f},{j3:.1f},{j4:.1f}) "
+            f"speed={speed if speed is not None else 'default'} "
+            f"[skeleton — safety + motion not wired yet]"
+        )
+
     async def cmd_mode(self):
         """Query robot mode via dashboard."""
         if not self.dashboard:
@@ -724,6 +847,8 @@ class Workbench:
                     print("  stop_drag    - Leave drag/teach mode")
                     print("  probe_start <J2>  - Auto-position to (0, J2, 46, 0) for T7B coupling probe")
                     print("  jog <axis> <±deg> - Step single joint (e.g. jog j3 +1, jog j2 -5)")
+                    print("  move_l <x> <y> <z> <r> [speed] - Linear move (safety-gated)")
+                    print("  joint_mov_j <j1> <j2> <j3> <j4> [speed] - Absolute joint move")
                     print("  mode         - Query robot mode")
                     print("  version      - Query version")
                     print("  sing?        - Singularity analysis")
@@ -752,6 +877,10 @@ class Workbench:
                     await self.cmd_probe_start(args)
                 elif cmd == "jog":
                     await self.cmd_jog(args)
+                elif cmd == "move_l":
+                    await self.cmd_move_l(args)
+                elif cmd == "joint_mov_j":
+                    await self.cmd_joint_mov_j(args)
                 elif cmd == "mode":
                     await self.cmd_mode()
                 elif cmd == "version":

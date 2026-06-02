@@ -853,5 +853,170 @@ class TestSpeed(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Dashboard not connected", output)
 
 
+class TestMoveLSkeleton(unittest.IsolatedAsyncioTestCase):
+    """move_l <x> <y> <z> <r> [speed] — parse + pre-check stage only.
+
+    Safety gate and motion send are added in later commits; these tests pin
+    down the arg-validation and pre-check fail-fast paths.
+    """
+
+    def setUp(self):
+        self.config = MagicMock()
+        self.state = MagicMock()
+        self.state.snapshot = _snap()
+        self.monitor = MagicMock()
+        self.dashboard = MagicMock()
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=self.move
+        )
+
+    async def test_happy_path_passes_preconditions(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        # Skeleton placeholder is printed; mov_l never called yet.
+        self.move.mov_l.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("target=(250.0,0.0,-30.0,0.0)", output)
+        self.assertIn("skeleton", output)
+
+    async def test_with_speed_arg_parses(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0 20")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("speed=20", output)
+
+    async def test_wrong_arg_count_rejected(self):
+        for args in ("", "1 2 3", "1 2 3 4 5 6"):
+            with patch("builtins.print") as mp:
+                await self.workbench.cmd_move_l(args)
+            self.move.mov_l.assert_not_called()
+            output = "\n".join(str(c) for c in mp.call_args_list)
+            self.assertIn("Usage:", output)
+
+    async def test_non_numeric_coord_rejected(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 foo -30 0")
+        self.move.mov_l.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("non-numeric", output)
+
+    async def test_speed_out_of_range_rejected(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0 150")
+        self.move.mov_l.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("out of range", output)
+
+    async def test_blocked_when_disabled(self):
+        self.state.snapshot = _snap(enable_status=0, robot_mode=4)
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        self.move.mov_l.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("not enabled", output)
+
+    async def test_blocked_when_active_error(self):
+        self.state.snapshot = _snap(error_status=1)
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        self.move.mov_l.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("active error", output)
+
+    async def test_blocked_when_wrong_mode(self):
+        self.state.snapshot = _snap(robot_mode=7)  # RUNNING
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        self.move.mov_l.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("mode=7", output)
+
+    async def test_blocked_without_move_channel(self):
+        workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=None
+        )
+        with patch("builtins.print") as mp:
+            await workbench.cmd_move_l("250 0 -30 0")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("move channel not connected", output)
+
+    async def test_blocked_when_no_feedback_yet(self):
+        self.state.snapshot = None
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("250 0 -30 0")
+        self.move.mov_l.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("no feedback", output)
+
+
+class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
+    """joint_mov_j <j1> <j2> <j3> <j4> [speed] — parse + pre-check stage only."""
+
+    def setUp(self):
+        self.config = MagicMock()
+        self.state = MagicMock()
+        self.state.snapshot = _snap()
+        self.monitor = MagicMock()
+        self.dashboard = MagicMock()
+        self.move = MagicMock()
+        self.workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=self.move
+        )
+
+    async def test_happy_path_passes_preconditions(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 60 0")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("target=(0.0,0.0,60.0,0.0)", output)
+        self.assertIn("skeleton", output)
+
+    async def test_with_speed_arg_parses(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 60 0 30")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("speed=30", output)
+
+    async def test_wrong_arg_count_rejected(self):
+        for args in ("", "1 2 3", "1 2 3 4 5 6"):
+            with patch("builtins.print") as mp:
+                await self.workbench.cmd_joint_mov_j(args)
+            self.move.joint_mov_j.assert_not_called()
+            output = "\n".join(str(c) for c in mp.call_args_list)
+            self.assertIn("Usage:", output)
+
+    async def test_non_numeric_joint_rejected(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 foo 60 0")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("non-numeric", output)
+
+    async def test_speed_non_integer_rejected(self):
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 60 0 abc")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("non-integer speed", output)
+
+    async def test_blocked_when_disabled(self):
+        self.state.snapshot = _snap(enable_status=0, robot_mode=4)
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 60 0")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("not enabled", output)
+
+    async def test_blocked_without_move_channel(self):
+        workbench = Workbench(
+            self.config, self.state, self.monitor, self.dashboard, move=None
+        )
+        with patch("builtins.print") as mp:
+            await workbench.cmd_joint_mov_j("0 0 60 0")
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("move channel not connected", output)
+
+
 if __name__ == "__main__":
     unittest.main()
