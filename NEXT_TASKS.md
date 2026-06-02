@@ -306,6 +306,106 @@ async def move_l(target: Pose) -> None:
 
 ---
 
+## 🚨 下次硬體 session checklist(源自 2026-06-02 merge 的 4 個 PR，全部離線測試綠但實機未跑)
+
+照「最便宜安全 → 較進階」順序，開機 + enable 後依序跑。每項通過再進下一項。
+
+### H1. PR #20 (B6) — feedback `r` 欄位對位 ⭐ 先做
+
+**改了什麼**:`FeedbackFrame.pose.r` 釘死 = `tool_vector_actual[3]`(6 分量中的 Rx)。離線靠 demo + PDF 推斷釘住。
+
+**驗法**:
+```
+mg400> live
+```
+然後手動轉 J1 或 J4(unlock 拖曳 / DobotStudio jog)。觀察 workbench 印的 `r`:
+
+- ✅ `r` 跟 30004 報的同步變、跟 `r = J1 + J4`(finding 1)一致 → pin 對
+- ❌ `r` 不動或方向反 → 試 `tool_vector_actual[4]`(Ry)或 `[5]`(Rz),改 `robot_core/transport/feedback.py`,重啟 workbench 再驗
+
+**最便宜的測試**(無運動指令,純讀)。
+
+### H2. PR #22 (Phase 3.2) — FK/IK 控制器交叉驗 ⭐ 同樣便宜
+
+**改了什麼**:加 8 個座標系指令含 `PositiveSolution`(控制器算 FK)/ `InverseSolution`(控制器算 IK)。
+
+**驗法**(ad-hoc Python,要手臂 enable 但**不會動**):
+```python
+from robot_core.transport import FramedConnection
+from robot_core.protocol import DashboardClient
+from robot_core.kinematics import forward_kinematics, inverse_kinematics
+
+conn = FramedConnection("192.168.1.6", 29999); conn.connect()
+d = DashboardClient(conn)
+
+# (a) 控制器 FK vs 我們 FK
+print("controller FK:", d.positive_solution(0, 0, 60, 0, user=0, tool=0))
+print("our FK:       ", forward_kinematics(0, 0, 60, 0))
+# 預期差 < 0.1mm / 0.1°
+
+# (b) 控制器 IK vs 我們 IK (用 factory pose)
+print("controller IK:", d.inverse_solution(197.2, 0, -30.3, 0, user=0, tool=0))
+print("our IK:       ", inverse_kinematics(197.2, 0, -30.3, 0))
+# 控制器應回 J≈(0, 0, 60, 0)
+```
+
+- ✅ 兩組差 < 0.1mm / 0.1° → 我們的 FK/IK 模型(finding 2/3)補強為「控制器同意」
+- ❌ 差 > 1mm / 1° → 某個 corner 偏掉,需要重新擬合 / 抓 bug
+
+`get_pose(user=1, tool=2)` 也可順便試 — 若 User=1 / Tool=2 未校過,應回 `ErrorID=-1`(預期)。
+
+### H3. PR #21 (B1) — `EnableRobot(load, cx, cy, cz)`
+
+**改了什麼**:`enable` workbench verb 接受 0/1/4 參數簽名。
+
+**驗法**(disable → 重 enable 三次):
+```
+mg400> disable
+mg400> enable                    # 0 參數
+mg400> disable
+mg400> enable 0.5                # 1 參數,0.5kg 負載
+mg400> disable
+mg400> enable 0.5 0 0 30         # 4 參數,0.5kg + cz=30mm 偏心
+```
+
+- ✅ 三組都印 `Received: 0,{},EnableRobot(...);` → 動力學補償啟用
+- ❌ 4 參數那組 `-30000` → `cx/cy/cz` 必須在 `[-500, 500]` mm(spec)
+
+**注意**:你目前抓取場景如果有用治具,確認治具實際質心偏移代入 cx/cy/cz。**未來抓物**:每換工件就 disable → enable 4 參數重設。
+
+### H4. PR #21 (B2+B3) — `MovL/MovJ/JointMovJ` 可選 kwargs
+
+**改了什麼**:每個 mov_* 可選 `SpeedL/AccL/SpeedJ/AccJ/CP/User/Tool`。
+
+**驗法**:**目前 workbench 沒 motion verb 暴露這些參數**——要等 T8 (Phase 5 motion 原語) 上線 verb 才好驗。短期可寫一次性 Python:
+```python
+from robot_core.protocol import MoveClient
+from robot_core.transport import FramedConnection
+conn = FramedConnection("192.168.1.6", 30003); conn.connect()
+m = MoveClient(conn)
+# 從目前位置往同位置 mov_j(零位移),帶 SpeedJ 測接受度
+# (要先讀 status 確認當前 joints)
+print(m.joint_mov_j(0, 0, 60, 0, speed_j=20, acc_j=20, cp=50))
+```
+- ✅ 回 `0,{},JointMovJ(...);` 且手臂沒亂動 → 參數接受
+- ❌ `-30000` → kwargs 名字或值域不對,看回應字串對照 PDF 第 7-13 頁
+
+**建議延後**:跟 T8 Phase 5 motion 一起做更省事。
+
+### H5. PR #22 — `User()` / `Tool()` 切換指令(可選)
+
+如果你之後要做 UI 座標圖、或用治具(Tool 系)、或多工作平面(User 系),驗:
+```
+mg400> # 先在 DobotStudio 標定 User=1 跟 Tool=1
+mg400> # 然後 ad-hoc:
+>>> d.user(1)   # 切到 User 系 1
+>>> d.tool(1)   # 切到 Tool 系 1
+>>> d.get_pose()  # 看 pose 在新系下的座標
+```
+這組沒標定就跳過——controller 會回 `-1` 表示索引未配置。
+
+---
+
 ## 預估工時
 
 - P0(T1-T4):**1 小時**(全離線)
