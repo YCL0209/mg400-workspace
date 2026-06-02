@@ -20,5 +20,10 @@ outputs/
 # macOS
 .DS_Store
 
+# Operator scratch files at repo root (PDFs, screenshots, ad-hoc captures)
+/*.pdf
+/*.png
+/safety_v1.json
+
 # Claude 本地設定（若日後新增共用 settings.json 仍可被追蹤）
 .claude/settings.local.json

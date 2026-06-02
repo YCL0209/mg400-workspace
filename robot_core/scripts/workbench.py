@@ -17,17 +17,23 @@ Run it::
     MG400_IP=192.168.1.20 python -m robot_core.scripts.workbench
 
 Commands at mg400> prompt:
-    status      - Show current state once
-    live        - Live update every 0.5s (Enter to exit)
-    enable      - Enable robot via dashboard
-    disable     - Disable robot via dashboard
-    clear       - Clear errors via dashboard
-    mode        - Query robot mode
-    version     - Query version info
-    sing?       - Show singularity distances
-    mark <label>- Mark current position as limit point
-    save        - Save marked points to file
-    q           - Quit (auto-saves if points exist)
+    status            - Show current state once
+    live              - Live update every 0.5s (Enter to exit)
+    enable            - Enable robot via dashboard
+    disable           - Disable robot via dashboard
+    clear             - Clear errors via dashboard
+    speed <percent>   - Set global speed factor (1-100%)
+    continue          - Resume queue (after ClearError)
+    start_drag        - Enter software drag/teach mode
+    stop_drag         - Leave software drag/teach mode
+    probe_start <J2>  - Auto-position to (0, J2, 46, 0) for T7B coupling probe
+    jog <axis> <±deg> - Step single joint (e.g. jog j3 +1, jog j2 -5)
+    mode              - Query robot mode
+    version           - Query version info
+    sing?             - Show singularity distances
+    mark <label>      - Mark current position as limit point
+    save              - Save marked points to file
+    q                 - Quit (auto-saves if points exist)
 """
 
 from __future__ import annotations
@@ -56,6 +62,24 @@ OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "outputs"
 FIRST_FRAME_TIMEOUT_S = 10.0
 LIVE_UPDATE_INTERVAL_S = 0.5
 PROMPT = "mg400> "
+
+# T7B coupling-probe start point: 60% of v1 J3 cap 77.3°, ≥10° below the
+# observed alarm boundary (~55–56°) — leaves buffer for the manual 1° push.
+PROBE_START_J3 = 46.0
+PROBE_SYNC_TIMEOUT_S = 30.0
+ROBOT_MODE_ENABLE = 5
+ROBOT_MODE_RUNNING = 7
+ROBOT_MODE_ERROR = 9
+
+# Snapshot settle: MoveClient.sync() returns once the controller's queue drains,
+# but the async feedback task may not yet have processed the post-motion frame
+# — reading state.snapshot immediately can return pre-motion joints, and any
+# follow-up command (e.g. jog) that derives its target from "current" joints
+# would compute against stale values. Poll until feedback catches up to the
+# JointMovJ target (~one feedback frame at 8ms cadence) before declaring done.
+SNAPSHOT_SETTLE_TOL_DEG = 0.5
+SNAPSHOT_SETTLE_TIMEOUT_S = 2.0
+SNAPSHOT_POLL_INTERVAL_S = 0.02
 
 
 @dataclass
@@ -276,6 +300,37 @@ class Workbench:
         except Exception as e:
             print(f"Dashboard error: {e}")
 
+    async def cmd_speed(self, args: str):
+        """Set global motion speed factor (1-100%, applies to all subsequent moves).
+
+        Persists until DisableRobot / power-cycle. T7B採點建議全程低速（20%~30%）。
+        """
+        if not self.dashboard:
+            print("Dashboard not connected")
+            return
+        if not args.strip():
+            print("Usage: speed <percent>  (1-100)")
+            return
+        try:
+            percent = int(args.strip())
+        except ValueError:
+            print(f"Invalid percent: {args!r} — expected integer 1-100")
+            return
+        if not (1 <= percent <= 100):
+            print(f"Percent {percent} out of range [1, 100] — refusing")
+            return
+
+        print(f"Sending: SpeedFactor({percent})")
+        try:
+            response = self.dashboard.speed_factor(percent)
+            print(f"Received: {response.raw}")
+            if response.error_id == 0:
+                print(f"Global speed set to {percent}%")
+            else:
+                print(f"SpeedFactor failed: error {response.error_id}")
+        except Exception as e:
+            print(f"Dashboard error: {e}")
+
     async def cmd_continue(self):
         """Resume the move queue via dashboard (the recovery step after ClearError)."""
         if not self.dashboard:
@@ -326,6 +381,168 @@ class Workbench:
                 print(f"StopDrag failed: error {response.error_id}")
         except Exception as e:
             print(f"Dashboard error: {e}")
+
+    async def _arm_joint_move(
+        self,
+        target: "tuple[float, float, float, float]",
+        op_desc: str,
+    ) -> bool:
+        """Send ``JointMovJ`` + ``Sync`` with pre/post safety checks.
+
+        Pre-check (move channel up; feedback present; enabled; mode==5; no error)
+        gates the send. Enqueue ack error short-circuits before sync. Post-check
+        warns if the move dropped the robot out of ENABLE state (= controller
+        alarmed). Returns ``True`` on a clean move, ``False`` on any failure.
+        Used by both ``probe_start`` (T7B auto-position) and ``jog`` (1° steps).
+        """
+        if not self.move:
+            print(f"{op_desc}: move channel not connected (30003) — refusing")
+            return False
+
+        snap = self.state.snapshot
+        if snap is None:
+            print(f"{op_desc}: no feedback yet — cannot pre-check, refusing")
+            return False
+        if not snap.is_enabled:
+            print(f"{op_desc}: robot not enabled (mode={snap.robot_mode}) — run `enable` first")
+            return False
+        if snap.robot_mode != ROBOT_MODE_ENABLE:
+            print(
+                f"{op_desc}: robot mode={snap.robot_mode}, "
+                f"expected {ROBOT_MODE_ENABLE} (ENABLE) — refusing"
+            )
+            return False
+        if snap.has_error:
+            print(
+                f"{op_desc}: active error (error_status={snap.error_status}) — "
+                f"run `clear` first"
+            )
+            return False
+
+        print(f"{op_desc}: JointMovJ{target} + Sync()")
+        try:
+            ack = self.move.joint_mov_j(*target)
+            if ack.error_id != 0:
+                print(f"{op_desc}: JointMovJ enqueue failed: error {ack.error_id} ({ack.raw})")
+                return False
+            self.move.sync(timeout_s=PROBE_SYNC_TIMEOUT_S)
+        except Exception as e:
+            print(f"{op_desc}: move error: {e}")
+            return False
+
+        # Wait for feedback to catch up: BOTH joints close to target AND mode
+        # back to ENABLE. Sync() returns when the controller's queue drains
+        # but the firmware may still be transitioning mode 7 RUNNING → 5
+        # ENABLE for a few feedback frames. If we read snapshot during that
+        # window and only checked joints, we'd see "joints at target, mode=7"
+        # and misreport it as an alarm. Bail early on real alarm (mode=9 /
+        # has_error) so the operator sees that quickly.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + SNAPSHOT_SETTLE_TIMEOUT_S
+        converged = False
+        while loop.time() < deadline:
+            post = self.state.snapshot
+            if post is not None:
+                if post.has_error or post.robot_mode == ROBOT_MODE_ERROR:
+                    break
+                joints_close = all(
+                    abs(actual - want) < SNAPSHOT_SETTLE_TOL_DEG
+                    for actual, want in zip(post.joints, target)
+                )
+                if joints_close and post.robot_mode == ROBOT_MODE_ENABLE:
+                    converged = True
+                    break
+            await asyncio.sleep(SNAPSHOT_POLL_INTERVAL_S)
+
+        post = self.state.snapshot
+        if post is None:
+            print(f"{op_desc}: lost feedback after move — please check status manually")
+            return False
+        if post.has_error or post.robot_mode == ROBOT_MODE_ERROR:
+            print(
+                f"⚠ {op_desc}: controller alarmed — mode={post.robot_mode}, "
+                f"err={post.has_error}"
+            )
+            return False
+        j1a, j2a, j3a, j4a = post.joints
+        if not converged:
+            print(
+                f"⚠ {op_desc}: motion did not settle to ENABLE within "
+                f"{SNAPSHOT_SETTLE_TIMEOUT_S}s (mode={post.robot_mode}) — "
+                f"readback may not yet reflect final position"
+            )
+        print(f"{op_desc}: moved to J=({j1a:.1f}, {j2a:.1f}, {j3a:.1f}, {j4a:.1f})")
+        return True
+
+    async def cmd_probe_start(self, args: str):
+        """Auto-position to (J1=0, J2=<arg>, J3=46, J4=0) — the T7B coupling-probe start.
+
+        From this pose the operator uses ``jog j3 +1`` to step J3 upward until
+        the controller alarms, then backs off and marks ``coup_j2_<value>``. J3
+        is fixed at :data:`PROBE_START_J3` (46° ≈ 60% of v1 cap 77.3°). Safety
+        gate integration for motion lives in Phase 5; this verb relies on the
+        controller's own per-axis range enforcement.
+        """
+        if not args.strip():
+            print("Usage: probe_start <J2>")
+            return
+        try:
+            j2 = float(args.strip())
+        except ValueError:
+            print(f"Invalid J2: {args!r} — expected float in degrees")
+            return
+
+        j2_low, j2_high = self.bounds.joint_ranges_deg["J2"]
+        if not (j2_low <= j2 <= j2_high):
+            print(f"J2={j2}° out of range [{j2_low}, {j2_high}] — refusing")
+            return
+
+        target = (0.0, j2, PROBE_START_J3, 0.0)
+        ok = await self._arm_joint_move(target, f"probe_start J2={j2:+.1f}")
+        if ok:
+            print("Ready — `jog j3 +1` to step J3 toward the coupling boundary")
+
+    async def cmd_jog(self, args: str):
+        """Step a single joint by a signed delta (deg) via JointMovJ.
+
+        Per-axis range from ``bounds.joint_ranges_deg`` enforced before sending;
+        coupling violations are NOT pre-checked (the whole point of T7B is to
+        discover them — the controller's own alarm decides).
+        """
+        parts = args.split()
+        if len(parts) != 2:
+            print("Usage: jog <axis> <±deg>  (axis ∈ j1..j4; e.g. jog j3 +1, jog j2 -5)")
+            return
+        axis_raw, delta_raw = parts
+        axis = axis_raw.upper()
+        if axis not in ("J1", "J2", "J3", "J4"):
+            print(f"Invalid axis: {axis_raw!r} — expected j1, j2, j3, or j4")
+            return
+        try:
+            delta = float(delta_raw)
+        except ValueError:
+            print(f"Invalid delta: {delta_raw!r} — expected signed float in degrees")
+            return
+
+        snap = self.state.snapshot
+        if snap is None:
+            print("jog: no feedback yet — cannot read current joints, refusing")
+            return
+        joints = list(snap.joints)
+        axis_idx = {"J1": 0, "J2": 1, "J3": 2, "J4": 3}[axis]
+        new_value = joints[axis_idx] + delta
+
+        low, high = self.bounds.joint_ranges_deg[axis]
+        if not (low <= new_value <= high):
+            print(
+                f"jog {axis} {delta:+.2f}: target {new_value:.2f}° out of "
+                f"range [{low}, {high}] — refusing"
+            )
+            return
+
+        joints[axis_idx] = new_value
+        target = (joints[0], joints[1], joints[2], joints[3])
+        await self._arm_joint_move(target, f"jog {axis} {delta:+.2f}")
 
     async def cmd_mode(self):
         """Query robot mode via dashboard."""
@@ -465,9 +682,12 @@ class Workbench:
                     print("  enable       - Enable robot")
                     print("  disable      - Disable robot")
                     print("  clear        - Clear errors")
+                    print("  speed <pct>  - Set global speed factor 1-100% (T7B: try 20)")
                     print("  continue     - Resume queue (after ClearError)")
                     print("  start_drag   - Enter drag/teach mode (replaces unlock button)")
                     print("  stop_drag    - Leave drag/teach mode")
+                    print("  probe_start <J2>  - Auto-position to (0, J2, 46, 0) for T7B coupling probe")
+                    print("  jog <axis> <±deg> - Step single joint (e.g. jog j3 +1, jog j2 -5)")
                     print("  mode         - Query robot mode")
                     print("  version      - Query version")
                     print("  sing?        - Singularity analysis")
@@ -484,12 +704,18 @@ class Workbench:
                     await self.cmd_disable()
                 elif cmd == "clear":
                     await self.cmd_clear()
+                elif cmd == "speed":
+                    await self.cmd_speed(args)
                 elif cmd == "continue":
                     await self.cmd_continue()
                 elif cmd == "start_drag":
                     await self.cmd_start_drag()
                 elif cmd == "stop_drag":
                     await self.cmd_stop_drag()
+                elif cmd == "probe_start":
+                    await self.cmd_probe_start(args)
+                elif cmd == "jog":
+                    await self.cmd_jog(args)
                 elif cmd == "mode":
                     await self.cmd_mode()
                 elif cmd == "version":

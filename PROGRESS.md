@@ -290,6 +290,60 @@ dash.sendall(b"RobotMode();")
 
 **注意**:這不一定否定 finding 16(雙 enable trap)。可能兩條都存在(獨立 trap),也可能只有 17 是真的、16 的 -10000 從頭到尾都是 3-port 缺造成的。修完上手臂驗證後回頭改寫 finding 16。
 
+### 18. **📜 線上 byte 格式以 demo 為準:送端帶 `;` 是 code-vs-doc 漂移(2026-06-01)**
+
+**現象**:三埠 mount 成功(finding 17 修法上線)後實機跑 workbench `enable` → 仍回 `-10000,{},`。三埠連好、不是 finding 17、也沒雙 enable(finding 16),新症狀。
+
+**對比審計發現**(`COMPARISON_REPORT.md`,worktree branch `worktree-comparison-report`):我們 `transport/connection.py:223` 在送指令時 `+ self._terminator`,送線是 `EnableRobot();`,**但 reference fork 的 `send_data` 從不加 `;`**(送 `EnableRobot()`)。CLAUDE.md「`;` 規則」段也明文「送不加 `;`」——也就是 **code 早就漂離 doc**,只是沒人盯。Finding 17 的 ad-hoc probe 剛好也帶 `;` 而通了,所以這個分歧躲過早期偵測。
+
+**原則(寫進 CLAUDE.md 第一規則)**:**reference demo 是「真的能操控硬體」的證明,凡屬線上 byte 格式以 demo 為準**——demo 跑通了多年,我們是新人。發現我們 code 跟 demo 線上格式不一致,**先假設我們錯**,回頭對齊 demo,再回頭證明 demo 錯(要有實機證據)。
+
+**修法(commit `3d623c1`)**:`connection.py:223` 去掉 `+ self._terminator` → 送 `b"EnableRobot()"`。Docstring 補對齊 demo 的說明。`test_framing.py` 對應 assertion 從 `b"EnableRobot();"` → `b"EnableRobot()"`。175 unit tests 仍全綠。
+
+**收端 `_terminator` 不動**:`extract_frames` 仍按 `;` 切框(line 238);PR #9 雙 `;` 殘留清除也不受影響——那都是「收端」邏輯,協定真理。
+
+**待實機確認**(尚未驗):Windows pull 後 workbench `mode` 應該回 `0,{...},RobotMode();` 而非 -10000。**如果仍 -10000 → `;` 不是元兇**,要回頭查 dashboard 模式設定(finding 11)/ 雙 enable 殘留(finding 16)/ 控制器 power-cycle。
+
+**Lesson**:CLAUDE.md 的協定規則段是寫給未來的自己看的——code 漂離 doc 沒人發現,因為「能跑」沒人盯。下次新增一條 wire-format 規則時,在 PR 加一條 unit test 把「送出 byte 字面值」釘住,讓漂移在 review 時可見。
+
+### 19. **🎯 J2/J3 coupling 是單一線性約束 `J3 − J2 ≤ 60°`(2026-06-01 T7B 確證)**
+
+T7B 採點 5 個 J2 樣本（−10、−5、0、+5、+20）用「push J3 直到 controller alarm」協定。**4/4 alarm trigger 完全擬合單一線性約束**：
+
+| J2 | last stable J3 | controller rejected J3 | **J3 − J2** |
+|---|---|---|---|
+| −10 | 49 | 50 | **60** |
+| −5  | 54 | 55 | **60** |
+| 0   | 59 | 60 | **60** |
+| +5  | 64 | 65 | **60** |
+| +20 | 77 | (per-axis cap 77.3 擋住) | 57（一致，無 alarm） |
+
+**物理意義**：MG400 平行四連桿——當前臂跟後臂的相對開合角度 `J3 − J2 > 60°`，連桿撞到機械摺疊上限。原廠 SDK doc 沒記載這條約束。
+
+**Deploy（commit 待補）**：
+- `config/safety.json` 的 `j2_j3_coupling`:
+  ```json
+  [{"j2_coeff": -1.0, "j3_coeff": 1.0, "max_value": 59.95, "label": "j3_minus_j2_le_60"}]
+  ```
+  `max_value = 59.95` = 已知可達（J3-J2=59）跟 controller 拒絕（J3-J2=60）的中點，留 0.05° margin 給 feedback 浮動。Factory pose J3=59.903 < 59.95，accepted ✓。
+- `joint_ranges_deg.J3` 上限從 77.3° 放回 spec **105°**（有 polygon 保護，per-axis 粗鎖可以拆）
+- `_coupling_note.status` → `FITTED_BY_T7B`
+
+**Deploy gate 三條 sanity 全綠**（離線跑）：
+1. Factory pose (J=(-0.007, -0.021, 59.903, 2.681)) → polygon **approved** ✓
+2. T7B 9 個採點 mark（5 stable + 4 alarm-tagged）→ **全 approved** ✓
+3. Alarm 觸發 target（J3 = J2 + 60 at 4 個 J2）→ **全 rejected** ✓
+
+**為什麼 T7A 的 piecewise envelope 演算法沒派上用場**：T7A 預期資料有 noise（operator 主觀邊界、masquerading z_floor 點），所以做分段 rising-flat 擬合。但 T7B「push 到 controller alarm」資料太乾淨——4 個 alarm trigger 完全在直線上——polygon 直接手寫一條更精準。**T7A 的演算法保留**，未來如果其他 robot 或新限制需要再用。
+
+**Lesson**：實機驗證的 coupling 資料**比 SDK doc 還細**（doc 給 J2/J3 各自範圍但沒給相對關係）；只要採點協定對（直推到 alarm，不是 operator 心理界線），少量樣本就能釘住線性物理約束。
+
+**沒採到的 J2 範圍**（待補）：
+- `J2 ∈ {-15, -20}`：probe_start 卡 forbidden 起點（J3=46 起點 > J2+60 = 45 / 40 boundary）
+- `J2 ∈ {+10, +15, +30, +40}`：per-axis cap 77.3° 卡住（本 deploy 後 cap 升到 105° 就沒這個問題）
+
+下次 session 可選擇性補採 +30 / +40 驗證線性是否延伸到大 J2，沒採也不會有保護缺口（polygon 已涵蓋全範圍）。
+
 ---
 
 ## FK 校驗資料(10 筆真實配對,法蘭中心,mm/deg)

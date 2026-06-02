@@ -1,13 +1,14 @@
 {
   "_meta": {
-    "version": "phase-2b-v1.5",
+    "version": "phase-2b-v2-T7B",
     "date": "2026-06-01",
     "source_data": [
       "outputs/limits_20260529_132808.json (7 outer reach points)",
-      "outputs/limits_20260529_134228.json (5 J2/J3 coupling points)",
-      "outputs/limits_20260529_135459.json (1 z_floor point)"
+      "outputs/limits_20260529_134228.json (5 J2/J3 coupling points — v1, superseded by T7B)",
+      "outputs/limits_20260529_135459.json (1 z_floor point)",
+      "outputs/limits_t7b_20260601.json (9 T7B coupling points — 4 J2 with alarm+stable pair, 1 +20 stable only)"
     ],
-    "provenance": "Same 13-point real-arm dataset as v1. Re-processed by the T7A v2 calibrator (PR phase-2b-v2-calibrate). Numbers unchanged from v1; this bump records (a) the new calibrator capability and (b) that v2's polygon fit was attempted and intentionally NOT deployed because the v1 capture's coupling-probe data underestimates the true boundary (see _coupling_note). Polygon deployment deferred to v2 (T7B re-probe)."
+    "provenance": "v1.5 (T7A) workspace/joint_ranges retained. Coupling polygon NOW DEPLOYED from T7B push-to-alarm probe: 4/4 alarm triggers fit the linear constraint J3 - J2 ≤ 60° exactly (see _coupling_note). J3 upper raised from observed 77.3° back to spec 105° because polygon now provides the real protection."
   },
 
   "workspace": {
@@ -28,32 +29,32 @@
   "joint_ranges_deg": {
     "J1": [-159.9, 157.0],
     "J2": [-25.0, 82.8],
-    "J3": [-25.0, 77.3],
+    "J3": [-25.0, 105.0],
     "J4": [-180.0, 180.0],
     "_provenance": {
-      "note": "v2 calibrator applies spec-fallback automatically for un-probed sides. J3 upper is kept at the observed coupling-limited value 77.3° (NOT the spec 105°) for the same reason coupling polygon is deferred: without a trusted polygon, per-axis J3 spec would over-permit (J2=0, J3=90 would pass even though real arm alarms ~55).",
+      "note": "v2 calibrator applies spec-fallback automatically for un-probed sides. J3 upper is now spec 105° because the J2/J3 coupling polygon (fitted by T7B 2026-06-01) provides the real protection — per-axis cap was the workaround for missing polygon.",
       "J1": "both ends intentionally pushed to limit during outer_left135/right135",
       "J2_upper": "from floor_0 (J2=82.8, pushed to limit)",
       "J2_lower": "spec fallback (observed min -14.7°, 10.3° from spec → not trusted)",
-      "J3_upper": "MANUAL OVERRIDE — kept at v1 observed cap 77.3° because no trusted coupling polygon. Calibrator suggests 105° (spec) but that's only safe when paired with a polygon.",
+      "J3_upper": "spec — coupling polygon J3 - J2 ≤ 60° enforces the real mechanical envelope (see j2_j3_coupling). Per-axis spec is a sanity backstop only.",
       "J3_lower": "spec fallback (real arm not pushed to J3 lower limit)",
       "J4": "spec fallback — J4 was not exercised (random subset)"
     }
   },
 
-  "j2_j3_coupling": [],
+  "j2_j3_coupling": [
+    {"j2_coeff": -1.0, "j3_coeff": 1.0, "max_value": 59.95, "label": "j3_minus_j2_le_60"}
+  ],
 
   "_coupling_note": {
-    "status": "DEFERRED_TO_T7B",
-    "v2_algorithm_ready": "calibrate_bounds v2 (T7A) can FIT a 2-segment piecewise envelope from coupling data: select_coupling_points → filter_masquerading_points (J2_cutoff=50°, z_proximity=30mm) → fit_piecewise_envelope. Running it on the v1 capture produces coup_rising / coup_flat (see outputs/calibrated_bounds_*.json for the result).",
-    "why_not_deployed_from_v1_data": "The fitted polygon rejects the factory pose (J2=0, J3≈60) which is a known-safe stable arm position (PROGRESS finding 4 / calibration pair A1). The v1 coupling probe points captured operator-judged J3 maxima of 50.4 (at J2=-7.4) and 55.3 (at J2=+14.1) — conservative boundaries that mathematically rule out the home pose. Either the probe technique was conservative (stopped before true alarm) or the alarm behavior differs between jog-into-limit vs static-hold, but either way: deploying a polygon that rejects home would block every Phase 5 motion from starting.",
-    "next_step_T7B": [
-      "Re-probe coupling points with explicit 'push J3 until alarm fires' protocol (vs operator judgment).",
-      "Capture J2 ∈ {-15, -10, -5, 0, +5, +10, +20, +30, +40} sweep at safe mid-z height to avoid table interference.",
-      "Sanity test: fitted polygon must accept factory pose (J2=0, J3=60) and reject known-alarm poses.",
-      "Then deploy the polygon to this config."
-    ],
-    "v1_protection_gap_in_meantime": "Without polygon, safety only enforces per-axis J3 ≤ 77.3° (the observed coupling-limited max at floor_0). Some (J2, J3) combinations will pass safety but alarm at controller mid-motion — known limitation, controller's own safety catches without hardware damage."
+    "status": "FITTED_BY_T7B",
+    "fitted_at": "2026-06-01",
+    "source": "outputs/limits_t7b_20260601.json (9 unique points from 5 J2 samples)",
+    "constraint": "J3 - J2 ≤ 60°  ⇔  -1·J2 + 1·J3 ≤ 60  (max_value=59.95 = midpoint between known-reachable J3-J2=59 and controller-rejected J3-J2=60)",
+    "fit_evidence": "4/4 alarm triggers fall exactly at J3-J2=60: (J2=0, alarm at J3=60), (J2=-5, alarm at J3=55), (J2=-10, alarm at J3=50), (J2=+5, alarm at J3=65). 5th sample at J2=+20 reached J3=77 (limited by per-axis cap 77.3°) without alarm — consistent with J3-J2=57 < 60.",
+    "physical_meaning": "MG400 parallel four-bar linkage: when the relative angle between the upper arm (J2) and forearm (J3) exceeds 60°, the linkage hits a mechanical fold limit. Constraint is linear (not piecewise) — original SDK doc does not document this; discovered empirically.",
+    "factory_pose_safe": "factory pose J3≈59.903 from PROGRESS finding 4 — 59.903 < 59.95, accepted by polygon. Phase 5 motion can resume from factory pose.",
+    "v2_algorithm_note": "calibrate_bounds T7A was designed for noisy piecewise envelopes; T7B's data was too clean (4 alarm triggers exactly linear) so the polygon was hand-derived rather than fit. See PROGRESS finding 19."
   },
 
   "_future_tool_offset": {
