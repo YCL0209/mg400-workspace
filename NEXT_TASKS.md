@@ -232,6 +232,80 @@ async def move_l(target: Pose) -> None:
 
 ---
 
+## 🆕 P2.5:官方 SDK 審計補齊(2026-06-02 加入,源自 `docs/OFFICIAL_VS_PROJECT_DIFF.md`)
+
+權威 = 官方 PDF。下列 task 按 DIFF 自己的優先序排;依賴 Phase 5/6 進度決定何時動。**不現在做**——T8/T9 motion 原語先穩了再回頭補。
+
+### T13. B6:feedback 1440-byte 欄位逐欄對官方表(離線,~2 小時)
+
+**Why**:現在實機 magic + FK 對齊 ⇒ 我們用的欄位 offset **是對的**,但**整個 1440 byte 沒逐欄核**過官方表(PDF 行 2836-3700 給精確 byte offset)。特別:官方 `ToolVectorActual` 是 **6 分量** (X,Y,Z,Rx,Ry,Rz),4 軸機型的 `r` 對應哪個分量我們**沒交叉驗證**過(workbench Δ 只比對 x,y,z 三軸)。
+
+**Scope**:
+- 對 `robot_core/transport/feedback.py` 的 numpy dtype 跟 PDF 表逐欄核對(reserved/padding 也要對)
+- 釘死 4 軸 `r` 來自哪個分量 + 加 unit test 寫死該欄位 offset
+- 對 RobotMode、EnableStatus、ErrorStatus、QActual、ToolVectorActual 等核心欄位寫 unit test 釘住 byte offset
+- 若發現我們解析錯的欄位:修 + 加 finding
+
+**Verify**:unittest 全綠 + workbench `live` 看到的 `r` 跟 30004 報的對應分量一致(差 < 0.1°)
+
+**順序**:T8 motion 原語上線前**強烈建議**做完——若 motion 命令吃 r 但我們讀的是錯欄位,Phase 5 demo 會神祕失敗。
+
+### T14. B1:`EnableRobot(load, cx, cy, cz)` 支援 0/1/4 簽名(離線,~30 分鐘)
+
+**Why**:官方 `EnableRobot(load, centerX, centerY, centerZ)` 支援 0 / 1 / 4 參數;我們只有 0。500g + 偏心 ≤40mm 抓取場景需要動力學補償。
+
+**Scope**:
+- `builders.py` `enable_robot()` → `enable_robot(load=None, cx=None, cy=None, cz=None)`,套官方值域(load double kg、cx/cy/cz double -500~500 mm)
+- `client.py` `DashboardClient.enable_robot()` 同步
+- workbench `cmd_enable()` 可選帶 load(`enable 0.5` 或 `enable 0.5 0 0 30` 之類)
+- Test:happy 0/1/4 簽名 + 各值域邊界
+
+**順序**:Phase 5 前;或者抓取場景出現再做。
+
+### T15. B2 + B3:`MovL/MovJ/JointMovJ` 補可選 kwargs(離線,~1 小時)
+
+**Why**:官方 `MovL(X,Y,Z,R, User=, Tool=, SpeedL=, AccL=, CP=)`、`MovJ` 同(`SpeedJ`/`AccJ`)、`JointMovJ(J1,J2,J3,J4, SpeedJ=, AccJ=, CP=)`。我們只有 4 位置參數。
+
+**Scope**:
+- builders 三個 mov_* 函式加 optional kwargs,validate + 拼成完整字串
+- client 同步
+- workbench `probe_start`/`jog` 可選帶 speed(替代 SpeedFactor 全局)
+- Tests:有沒有 kwargs 都通
+
+**順序**:T8 motion 原語起跑時順手做,讓 Phase 5 demo 可以逐指令客製。
+
+### T16. Phase 3.2 / B4-coords:8 條座標系指令(離線,~3-4 小時)
+
+**Why**:`docs/OFFICIAL_COORDINATE_SYSTEM_SPEC.md` 已備好。10 條官方座標系指令只實 2 條(GetPose、GetAngle)。**UI 座標圖開發前必須補完**。
+
+**Scope**(8 條):
+- `User(index)` / `Tool(index)` — 隊列,設全局
+- `SetUser(index, table)` / `SetTool(index, table)` — 立即,寫入指定槽
+- `CalcUser(index, dir, table)` / `CalcTool(index, dir, table)` — 立即,算變換後值
+- `PositiveSolution(J1..J4, User, Tool)` / `InverseSolution(X,Y,Z,R,..., isJointNear, JointNear)` — 立即,控制器算 FK/IK
+- 升級 `PoseResult` 帶 `user_index` / `tool_index` 欄位(否則 UI 拿到 pose 不知道是哪個系下)
+- Tests:每個指令 happy + 邊界
+
+**順序**:Phase 5 motion 收尾後、Phase 6 controller 之前。Phase 6 controller 的 TCP/Tool offset 架構會基於這 8 條。
+
+**前置**:T13(feedback `r` 釘死)、T15(mov_* User/Tool 參數)——T16 補的 User()/Tool() 指令會跟 motion 指令的 User/Tool 參數互動。
+
+### T17. B4-剩餘:Arc / Circle / MovLIO / MovJIO / DO 等(離線,~大,分批做)
+
+**Why**:官方有,我們無。`Arc` `Circle` 是 Phase 5/6 motion 需要;`MovLIO` `MovJIO` 是動中觸發 IO;`DO` 等是 controller phase 的 IO 控制。
+
+**Scope**:依需求逐條補,不一次補完。每條照 T15/T16 的 pattern(builder + client + test)。
+
+**順序**:Phase 5 demo 跑通後,看哪些指令實際需要再補。**避免 YAGNI**。
+
+### T18. B5 註記:30005 / 30006 feedback 埠(無動作,僅記錄)
+
+官方除 30004 外另有 30005(200ms)、30006(可配置)。**目前 30004 已足夠**,記錄供未來低頻需求參考(例如 UI 不需要 125 Hz、用 30005 5 Hz 就好,可省 CPU)。
+
+**不排 task**,只在 PROGRESS finding 20 留註記。
+
+---
+
 ## 預估工時
 
 - P0(T1-T4):**1 小時**(全離線)
