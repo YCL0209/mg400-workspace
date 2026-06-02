@@ -878,7 +878,7 @@ class TestMoveLSkeleton(unittest.IsolatedAsyncioTestCase):
         self.move.mov_l.assert_not_called()
         output = "\n".join(str(c) for c in mp.call_args_list)
         self.assertIn("target=(250.0,0.0,-30.0,0.0)", output)
-        self.assertIn("skeleton", output)
+        self.assertIn("safety=OK", output)
 
     async def test_with_speed_arg_parses(self):
         with patch("builtins.print") as mp:
@@ -949,6 +949,15 @@ class TestMoveLSkeleton(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(str(c) for c in mp.call_args_list)
         self.assertIn("no feedback", output)
 
+    async def test_safety_gate_rejects_unreachable_target(self):
+        """Target far beyond outer reach (440mm) → gate rejects [UNREACHABLE] or
+        [OUTSIDE_WORKSPACE]; mov_l never called."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_move_l("800 0 0 0")
+        self.move.mov_l.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("REJECT", output)
+
 
 class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
     """joint_mov_j <j1> <j2> <j3> <j4> [speed] — parse + pre-check stage only."""
@@ -966,15 +975,15 @@ class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
 
     async def test_happy_path_passes_preconditions(self):
         with patch("builtins.print") as mp:
-            await self.workbench.cmd_joint_mov_j("0 0 60 0")
+            await self.workbench.cmd_joint_mov_j("0 0 55 0")
         self.move.joint_mov_j.assert_not_called()
         output = "\n".join(str(c) for c in mp.call_args_list)
-        self.assertIn("target=(0.0,0.0,60.0,0.0)", output)
-        self.assertIn("skeleton", output)
+        self.assertIn("target=(0.0,0.0,55.0,0.0)", output)
+        self.assertIn("safety=OK", output)
 
     async def test_with_speed_arg_parses(self):
         with patch("builtins.print") as mp:
-            await self.workbench.cmd_joint_mov_j("0 0 60 0 30")
+            await self.workbench.cmd_joint_mov_j("0 0 55 0 30")
         output = "\n".join(str(c) for c in mp.call_args_list)
         self.assertIn("speed=30", output)
 
@@ -995,7 +1004,7 @@ class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
 
     async def test_speed_non_integer_rejected(self):
         with patch("builtins.print") as mp:
-            await self.workbench.cmd_joint_mov_j("0 0 60 0 abc")
+            await self.workbench.cmd_joint_mov_j("0 0 55 0 abc")
         self.move.joint_mov_j.assert_not_called()
         output = "\n".join(str(c) for c in mp.call_args_list)
         self.assertIn("non-integer speed", output)
@@ -1003,7 +1012,7 @@ class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
     async def test_blocked_when_disabled(self):
         self.state.snapshot = _snap(enable_status=0, robot_mode=4)
         with patch("builtins.print") as mp:
-            await self.workbench.cmd_joint_mov_j("0 0 60 0")
+            await self.workbench.cmd_joint_mov_j("0 0 55 0")
         self.move.joint_mov_j.assert_not_called()
         output = "\n".join(str(c) for c in mp.call_args_list)
         self.assertIn("not enabled", output)
@@ -1013,9 +1022,29 @@ class TestJointMovJSkeleton(unittest.IsolatedAsyncioTestCase):
             self.config, self.state, self.monitor, self.dashboard, move=None
         )
         with patch("builtins.print") as mp:
-            await workbench.cmd_joint_mov_j("0 0 60 0")
+            await workbench.cmd_joint_mov_j("0 0 55 0")
         output = "\n".join(str(c) for c in mp.call_args_list)
         self.assertIn("move channel not connected", output)
+
+    async def test_per_axis_out_of_range_rejected(self):
+        """J3=200 out of spec range [-25, 105] → reject before coupling check."""
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 200 0")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("JOINT_OUT_OF_RANGE", output)
+        self.assertIn("J3=200", output)
+
+    async def test_coupling_violation_rejected(self):
+        """J3 − J2 > 60 violates the finding-19 polygon — reject directly on
+        operator's joints, not after FK→IK round-trip (which could pick the
+        other elbow and approve a different config than what we'd send)."""
+        # J2=0, J3=75 → J3-J2 = 75 > 60, violates `j3_minus_j2_le_60`
+        with patch("builtins.print") as mp:
+            await self.workbench.cmd_joint_mov_j("0 0 75 0")
+        self.move.joint_mov_j.assert_not_called()
+        output = "\n".join(str(c) for c in mp.call_args_list)
+        self.assertIn("COUPLING_VIOLATED", output)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ from typing import Optional
 from robot_core.config import RobotConfig
 from robot_core.kinematics import forward_kinematics
 from robot_core.protocol import DashboardClient, MoveClient
+from robot_core.safety import evaluate_move
 from robot_core.safety.bounds import SafetyBounds, default_bounds
 from robot_core.state import RobotState, RobotStateMonitor, RobotStateSnapshot
 from robot_core.transport import AsyncFeedbackStream, FramedConnection
@@ -651,12 +652,16 @@ class Workbench:
         if snap is None:
             return
 
-        # T8.2 skeleton: parse + pre-check done. Safety gate (T8.3) and motion
-        # send + sidecar wait (T8.4) wired in subsequent commits.
+        target_pose = (x, y, z, r)
+        decision = evaluate_move(target_pose, snap, bounds=self.bounds)
+        if not decision.approved:
+            print(f"move_l REJECT [{decision.code}]: {decision.reason}")
+            return
+
         print(
             f"move_l: target=({x:.1f},{y:.1f},{z:.1f},{r:.1f}) "
             f"speed={speed if speed is not None else 'default'} "
-            f"[skeleton — safety + motion not wired yet]"
+            f"safety=OK [motion send not wired yet]"
         )
 
     async def cmd_joint_mov_j(self, args: str):
@@ -697,10 +702,34 @@ class Workbench:
         if snap is None:
             return
 
+        # joint_mov_j targets joints directly — going through evaluate_move's
+        # FK→IK round-trip would pick the elbow nearest current state and run
+        # the coupling polygon check on *that*, not on the joints we'll send.
+        # On the J2/J3 cusp the operator's typed joints can satisfy the polygon
+        # while the IK-picked elbow doesn't (or vice versa), so we check the
+        # constraints directly on the requested joints.
+        for axis, value in zip(("J1", "J2", "J3", "J4"), (j1, j2, j3, j4)):
+            low, high = self.bounds.joint_ranges_deg[axis]
+            if not (low <= value <= high):
+                print(
+                    f"joint_mov_j REJECT [JOINT_OUT_OF_RANGE]: "
+                    f"{axis}={value:.2f}° not in [{low}, {high}]"
+                )
+                return
+        for constraint in self.bounds.coupling:
+            lhs = constraint.j2_coeff * j2 + constraint.j3_coeff * j3
+            if lhs > constraint.max_value:
+                print(
+                    f"joint_mov_j REJECT [COUPLING_VIOLATED]: "
+                    f"{constraint.label}: {lhs:.2f} > {constraint.max_value} "
+                    f"(j2={j2:.2f}, j3={j3:.2f})"
+                )
+                return
+
         print(
             f"joint_mov_j: target=({j1:.1f},{j2:.1f},{j3:.1f},{j4:.1f}) "
             f"speed={speed if speed is not None else 'default'} "
-            f"[skeleton — safety + motion not wired yet]"
+            f"safety=OK [motion send not wired yet]"
         )
 
     async def cmd_mode(self):
