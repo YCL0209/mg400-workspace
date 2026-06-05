@@ -10,5 +10,10 @@
     "recv_timeout_s": 5.0,
     "max_retries": 3,
     "retry_backoff_s": 0.5
+  },
+  "viz": {
+    "host": "localhost",
+    "port": 8765,
+    "grid_step_mm": 50
   }
 }
