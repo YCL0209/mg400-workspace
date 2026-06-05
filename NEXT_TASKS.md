@@ -226,9 +226,38 @@ async def move_l(target: Pose) -> None:
 
 詳見 PROGRESS.md「workbench」段——controller 出來後 workbench 變 thin CLI over controller。
 
-### T11. Phase 9/10(視覺 + 手眼校正)
+### T11. 里程碑二:坐標系巡檢介面(Phase 9 視覺 + Phase 10 手眼校正)
 
-里程碑二範圍。Phase 5/6 穩了之後再展開。
+里程碑二範圍。**Phase 5/6 穩了之後再展開。**
+
+> ⚠️ **命名澄清**:這是「里程碑二 / Phase 9·10」,**不是** Phase 2b(safety bounds,已做)。
+> 設計文件雖題為「階段二」,指的就是這裡(避免與 Phase 2b 混淆)。
+
+**設計文件**:`docs/PHASE2_COORDINATE_INTERFACE_DESIGN.md`(全架構 + FOV 數學 + ws schema + 重用對照表)、
+`docs/COORDINATE_INTERFACE_DESIGN_NOTES.md`(7 條坐標系介面設計概念)。
+
+**用途**:巡檢 eye-in-hand —— 手臂帶相機拍配電盤跑 AOI。俯視 XY 介面畫:環形工作範圍 + 座標格 +
+即時手臂位姿 + 相機 FOV 框(隨手臂動)+(後續)AOI OK/NG 疊圖。**非取放**。
+
+**關鍵前提**:CV 專案 `/Users/liaoyacheng/Projects/phase5-panel` 是配電盤 AOI(PatchCore/anomalib),
+其 ArUco(DICT_4X4_50, ID 0)只做 `findHomography` 影像對齊,**無相機內參、無手眼標定、無手臂通訊**
+——故標定列為 M0。相機 = 台達 DeltaCamera 1280×960。
+
+**架構(三層)**:標定 artifact(JSON)/ Python WebSocket 後端(mg400-workspace,重用
+`AsyncFeedbackStream`(30004)+ `forward_kinematics` + `SafetyBounds`,每幀算 FOV)/ Three.js 俯視前端
+(只收絕對 base 座標,不做 transform)。
+
+**里程碑(分期,各自 plan→build→驗證)**:
+- **M0**:相機內參(棋盤格 `cv2.calibrateCamera`)+ 手眼標定(eye-in-hand `cv2.calibrateHandEye` → `T_tcp←cam`),
+  存 `config/camera_intrinsics.json` / `config/hand_eye.json`;互動腳本 `robot_core/scripts/handeye_calib.py`。
+- **M1**:ws 後端骨架 + 前端畫「靜態工作範圍 + 座標格」(先不接相機)。
+- **M2**:接 30004 即時位姿 + 算/畫 FOV 框(手臂動→框跟著動)。
+- **M3**:`phase5-panel` 加輸出 hook → 後端 `detections` → 前端疊 AOI 結果(兩專案維持鬆耦合)。
+
+**前置(動工前必過)**:
+1. Phase 5/6(motion 原語 + controller)穩定。
+2. **T16**(8 條官方座標系指令)補完 —— 現只 GetPose/GetAngle 2 條,**UI 座標圖硬前置**。
+3. **M0** 標定 artifact 就位 —— 沒有則 FOV 框只能粗估。
 
 ---
 
@@ -289,6 +318,8 @@ async def move_l(target: Pose) -> None:
 **順序**:Phase 5 motion 收尾後、Phase 6 controller 之前。Phase 6 controller 的 TCP/Tool offset 架構會基於這 8 條。
 
 **前置**:T13(feedback `r` 釘死)、T15(mov_* User/Tool 參數)——T16 補的 User()/Tool() 指令會跟 motion 指令的 User/Tool 參數互動。
+
+**下游**:T11(坐標系巡檢介面)的硬前置——見 T11。
 
 ### T17. B4-剩餘:Arc / Circle / MovLIO / MovJIO / DO 等(離線,~大,分批做)
 
