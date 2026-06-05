@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MG400 inspection viz — M1</title>
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0a; overflow: hidden;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace; color: #aaa; }
+      #canvas-root { position: absolute; inset: 0; }
+      #status { position: absolute; top: 8px; left: 12px; font-size: 12px; line-height: 1.4;
+        pointer-events: none; text-shadow: 0 0 4px #000; }
+      #status .ok { color: #6f9; }
+      #status .bad { color: #f66; }
+    </style>
+  </head>
+  <body>
+    <div id="canvas-root"></div>
+    <div id="status">
+      ws: <span id="ws-status" class="bad">disconnected</span><br/>
+      <span id="ws-info"></span>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
