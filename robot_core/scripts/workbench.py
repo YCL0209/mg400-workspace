@@ -28,6 +28,9 @@ Commands at mg400> prompt:
     stop_drag         - Leave software drag/teach mode
     probe_start <J2>  - Auto-position to (0, J2, 46, 0) for T7B coupling probe
     jog <axis> <±deg> - Step single joint (e.g. jog j3 +1, jog j2 -5)
+    move_l <x> <y> <z> <r> [speed] - Linear (Cartesian) move, safety-gated
+    joint_mov_j <j1> <j2> <j3> <j4> [speed] - Absolute joint move, safety-gated
+    demo_loop [iters] [speed] - Phase 5 T9 demo: cycle through 4-pose sequence
     mode              - Query robot mode
     version           - Query version info
     sing?             - Show singularity distances
@@ -52,6 +55,7 @@ from typing import Optional
 from robot_core.config import RobotConfig
 from robot_core.kinematics import forward_kinematics
 from robot_core.protocol import DashboardClient, MoveClient
+from robot_core.safety import evaluate_move
 from robot_core.safety.bounds import SafetyBounds, default_bounds
 from robot_core.state import RobotState, RobotStateMonitor, RobotStateSnapshot
 from robot_core.transport import AsyncFeedbackStream, FramedConnection
@@ -62,6 +66,20 @@ OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "outputs"
 FIRST_FRAME_TIMEOUT_S = 10.0
 LIVE_UPDATE_INTERVAL_S = 0.5
 PROMPT = "mg400> "
+
+# T9 Phase 5 demo pose sequence — 4 poses cycled in order, exercising XY swing,
+# R 正/負旋轉, and Z lift across cycles. Every pose is inside annulus [124, 440],
+# z [-197, 116], and J3-J2 polygon margin (59.95°) for the factory-area joint
+# configurations the IK picks.
+T9_POSE_SEQUENCE: tuple[tuple[float, float, float, float], ...] = (
+    (200.0,   0.0, -28.0,   0.0),  # 0: factory neutral (T8.5b/T8.5c verified)
+    (250.0,  50.0, -28.0,  30.0),  # 1: 前右 + R+30°
+    (250.0, -50.0, -28.0, -30.0),  # 2: 前左 + R-30° (mirror of 1)
+    (230.0,   0.0,  30.0,   0.0),  # 3: 抬高 z=+30 練 Z 軸 (joints ≈ 0,-10,30,0)
+)
+T9_DEFAULT_ITERS = 20  # 5 cycles of 4 poses — meaningful sample, ~quick run
+T9_DEFAULT_SPEED = 20
+T9_MAX_ITERS = 200  # 50 cycles cap; prevents `demo_loop 1000` runaway typo
 
 # T7B coupling-probe start point: 60% of v1 J3 cap 77.3°, ≥10° below the
 # observed alarm boundary (~55–56°) — leaves buffer for the manual 1° push.
@@ -80,6 +98,11 @@ ROBOT_MODE_ERROR = 9
 SNAPSHOT_SETTLE_TOL_DEG = 0.5
 SNAPSHOT_SETTLE_TIMEOUT_S = 2.0
 SNAPSHOT_POLL_INTERVAL_S = 0.02
+
+# Phase 5 motion completion timeout: cap any single move at 30s. T9's two safe
+# poses (~150mm apart at 20% speed) finish in <2s; 30s is the slack for slow
+# moves near limits. Both Sync() and the alarm sidecar share this ceiling.
+MOTION_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -580,6 +603,333 @@ class Workbench:
         target = (joints[0], joints[1], joints[2], joints[3])
         await self._arm_joint_move(target, f"jog {axis} {delta:+.2f}")
 
+    async def _await_motion_complete(
+        self, op_desc: str, *, timeout_s: float = MOTION_TIMEOUT_S
+    ) -> bool:
+        """Wait for queued motion to finish — Sync as primary, alarm as sidecar.
+
+        Per PDF p.5/48/56: ``Sync()`` is the standard "wait for motion complete"
+        signal — it blocks until the controller's queue drains. We wrap it in
+        :func:`asyncio.to_thread` so the workbench event loop keeps spinning
+        (CLAUDE.md "dashboard request-response may be sync" applies, but a
+        20-second Sync() would freeze input handling).
+
+        The PDF does not define Sync's behaviour under alarm, so we run an
+        independent edge subscription (``state.wait_for(mode==9 or has_error)``)
+        in parallel. Whichever fires first wins; the loser is cancelled. On
+        alarm we surface :meth:`DashboardClient.get_error_id` for diagnosis.
+
+        Returns ``True`` on clean completion, ``False`` on alarm / queue error
+        / overall timeout. The Sync thread may continue running past return —
+        we don't await it (no way to cancel a thread from outside), but the
+        controller will eventually reply and the future is GC'd.
+        """
+        sync_task = asyncio.create_task(
+            asyncio.to_thread(self.move.sync, timeout_s=timeout_s)
+        )
+        alarm_task = asyncio.create_task(
+            self.state.wait_for(
+                lambda s: s.robot_mode == ROBOT_MODE_ERROR or s.has_error
+            )
+        )
+
+        done, pending = await asyncio.wait(
+            [sync_task, alarm_task],
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=timeout_s,
+        )
+        for t in pending:
+            t.cancel()
+
+        if not done:
+            print(
+                f"⚠ {op_desc}: timeout after {timeout_s}s "
+                f"— neither Sync nor alarm fired"
+            )
+            return False
+
+        if alarm_task in done:
+            try:
+                snap = alarm_task.result()
+                print(
+                    f"⚠ {op_desc}: ALARM — mode={snap.robot_mode} "
+                    f"err={snap.has_error}"
+                )
+                if self.dashboard:
+                    try:
+                        err = self.dashboard.get_error_id()
+                        print(f"  GetErrorID: {err}")
+                    except Exception as e:
+                        print(f"  (could not query GetErrorID: {e})")
+                return False
+            except asyncio.CancelledError:
+                pass  # sync_task also in done — fall through
+
+        if sync_task in done:
+            try:
+                resp = sync_task.result()
+            except Exception as e:
+                print(f"⚠ {op_desc}: Sync() failed: {e}")
+                return False
+            if resp.error_id != 0:
+                print(f"⚠ {op_desc}: Sync returned error {resp.error_id}: {resp.raw}")
+                return False
+            print(f"{op_desc}: motion complete")
+            return True
+
+        return False
+
+    def _check_motion_preconditions(self, op_desc: str) -> Optional[RobotStateSnapshot]:
+        """Common pre-flight for cmd_move_l / cmd_joint_mov_j.
+
+        Verifies move channel up, feedback present, robot enabled and in mode 5
+        ENABLE, and no active error. Returns the snapshot on success, ``None``
+        (after printing the reason) on any failure. Safety gate check is a
+        separate stage in the caller — this layer is the cheap fail-fast.
+        """
+        if not self.move:
+            print(f"{op_desc}: move channel not connected (30003) — refusing")
+            return None
+        snap = self.state.snapshot
+        if snap is None:
+            print(f"{op_desc}: no feedback yet — cannot pre-check, refusing")
+            return None
+        if not snap.is_enabled:
+            print(
+                f"{op_desc}: robot not enabled (mode={snap.robot_mode}) — "
+                f"run `enable` first"
+            )
+            return None
+        if snap.robot_mode != ROBOT_MODE_ENABLE:
+            print(
+                f"{op_desc}: robot mode={snap.robot_mode}, "
+                f"expected {ROBOT_MODE_ENABLE} (ENABLE) — refusing"
+            )
+            return None
+        if snap.has_error:
+            print(
+                f"{op_desc}: active error (error_status={snap.error_status}) — "
+                f"run `clear` first"
+            )
+            return None
+        return snap
+
+    async def _move_l_internal(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        r: float,
+        speed: Optional[int] = None,
+        *,
+        op_desc: str = "move_l",
+    ) -> bool:
+        """Reusable single MovL: pre-check + safety gate + send + Sync/alarm race.
+
+        Returns True on clean completion, False on any reject / alarm / queue
+        error. All prints carry the ``op_desc`` prefix so the caller does not
+        re-print. Internal callers (``cmd_demo_loop``, future T10 controller)
+        get a bool; ``cmd_move_l`` discards it because the REPL has no retry
+        loop.
+        """
+        snap = self._check_motion_preconditions(op_desc)
+        if snap is None:
+            return False
+
+        target_pose = (x, y, z, r)
+        decision = evaluate_move(target_pose, snap, bounds=self.bounds)
+        if not decision.approved:
+            print(f"{op_desc} REJECT [{decision.code}]: {decision.reason}")
+            return False
+
+        print(
+            f"{op_desc}: target=({x:.1f},{y:.1f},{z:.1f},{r:.1f}) "
+            f"speed={speed if speed is not None else 'default'}"
+        )
+        mov_kwargs = {} if speed is None else {"speed_l": speed}
+        try:
+            ack = self.move.mov_l(x, y, z, r, **mov_kwargs)
+        except Exception as e:
+            print(f"{op_desc}: send error: {e}")
+            return False
+        if ack.error_id != 0:
+            print(f"{op_desc}: queue rejected — error {ack.error_id}: {ack.raw}")
+            return False
+
+        return await self._await_motion_complete(op_desc)
+
+    async def cmd_move_l(self, args: str):
+        """Linear (Cartesian) move to (x, y, z, r). Safety-gated, event-driven completion.
+
+        Usage:
+            move_l <x> <y> <z> <r>             — default global speed (SpeedFactor)
+            move_l <x> <y> <z> <r> <speed_pct> — per-command SpeedL override (1-100)
+        """
+        parts = args.split()
+        if len(parts) not in (4, 5):
+            print(
+                f"move_l: takes 4 or 5 args (got {len(parts)}). "
+                "Usage: move_l <x> <y> <z> <r> [speed_pct]"
+            )
+            return
+        try:
+            x, y, z, r = (float(p) for p in parts[:4])
+        except ValueError:
+            print(f"move_l: non-numeric coord in {args.strip()!r}")
+            return
+        speed: Optional[int] = None
+        if len(parts) == 5:
+            try:
+                speed = int(parts[4])
+            except ValueError:
+                print(f"move_l: non-integer speed in {parts[4]!r}")
+                return
+            if not (1 <= speed <= 100):
+                print(f"move_l: speed {speed} out of range [1, 100] — refusing")
+                return
+
+        await self._move_l_internal(x, y, z, r, speed, op_desc="move_l")
+
+    async def cmd_demo_loop(self, args: str):
+        """T9 Phase 5 demo: cycle through ``T9_POSE_SEQUENCE`` N times via _move_l_internal.
+
+        Usage:
+            demo_loop                  — N=T9_DEFAULT_ITERS, speed=T9_DEFAULT_SPEED
+            demo_loop <iters>          — override iters (1..T9_MAX_ITERS)
+            demo_loop <iters> <speed>  — override both (speed 1..100)
+
+        Iter ``i`` picks ``T9_POSE_SEQUENCE[i % len(T9_POSE_SEQUENCE)]``, so
+        completing one full cycle takes ``len(T9_POSE_SEQUENCE)`` iters.
+        Aborts on first failure (safety REJECT / controller alarm / queue
+        error). Per-iteration ``op_desc`` carries ``demo_loop[i/N]`` so
+        REJECT/ALARM prints identify which iteration failed.
+        """
+        parts = args.split()
+        if len(parts) > 2:
+            print(
+                f"demo_loop: takes 0, 1, or 2 args (got {len(parts)}). "
+                "Usage: demo_loop [iters] [speed_pct]"
+            )
+            return
+
+        iters = T9_DEFAULT_ITERS
+        speed: Optional[int] = T9_DEFAULT_SPEED
+        if len(parts) >= 1:
+            try:
+                iters = int(parts[0])
+            except ValueError:
+                print(f"demo_loop: non-integer iters in {parts[0]!r}")
+                return
+            if not (1 <= iters <= T9_MAX_ITERS):
+                print(
+                    f"demo_loop: iters {iters} out of range "
+                    f"[1, {T9_MAX_ITERS}] — refusing"
+                )
+                return
+        if len(parts) == 2:
+            try:
+                speed = int(parts[1])
+            except ValueError:
+                print(f"demo_loop: non-integer speed in {parts[1]!r}")
+                return
+            if not (1 <= speed <= 100):
+                print(f"demo_loop: speed {speed} out of range [1, 100] — refusing")
+                return
+
+        n_poses = len(T9_POSE_SEQUENCE)
+        print(
+            f"demo_loop: {n_poses}-pose cycle iters={iters} speed={speed} "
+            f"(~{iters / n_poses:.1f} cycles)"
+        )
+        for idx, p in enumerate(T9_POSE_SEQUENCE):
+            print(f"  pose[{idx}]={p}")
+        for i in range(iters):
+            pose = T9_POSE_SEQUENCE[i % n_poses]
+            tag = f"demo_loop[{i + 1}/{iters}]"
+            ok = await self._move_l_internal(*pose, speed=speed, op_desc=tag)
+            if not ok:
+                print(f"demo_loop: ABORTED at iter {i + 1}/{iters}")
+                return
+        print(f"demo_loop: ✓ {iters}/{iters} moves complete")
+
+    async def cmd_joint_mov_j(self, args: str):
+        """Absolute joint move via JointMovJ. Safety-gated, event-driven completion.
+
+        Usage:
+            joint_mov_j <j1> <j2> <j3> <j4>             — default speed
+            joint_mov_j <j1> <j2> <j3> <j4> <speed_pct> — per-command SpeedJ (1-100)
+
+        For returning to a safe pose / factory pose between moves; the workspace
+        annulus check on Cartesian targets does not apply, but the J2/J3
+        coupling polygon (finding 19) is checked via FK→pose→gate in T8.3.
+        """
+        parts = args.split()
+        if len(parts) not in (4, 5):
+            print(
+                f"joint_mov_j: takes 4 or 5 args (got {len(parts)}). "
+                "Usage: joint_mov_j <j1> <j2> <j3> <j4> [speed_pct]"
+            )
+            return
+        try:
+            j1, j2, j3, j4 = (float(p) for p in parts[:4])
+        except ValueError:
+            print(f"joint_mov_j: non-numeric joint in {args.strip()!r}")
+            return
+        speed: Optional[int] = None
+        if len(parts) == 5:
+            try:
+                speed = int(parts[4])
+            except ValueError:
+                print(f"joint_mov_j: non-integer speed in {parts[4]!r}")
+                return
+            if not (1 <= speed <= 100):
+                print(f"joint_mov_j: speed {speed} out of range [1, 100] — refusing")
+                return
+
+        snap = self._check_motion_preconditions("joint_mov_j")
+        if snap is None:
+            return
+
+        # joint_mov_j targets joints directly — going through evaluate_move's
+        # FK→IK round-trip would pick the elbow nearest current state and run
+        # the coupling polygon check on *that*, not on the joints we'll send.
+        # On the J2/J3 cusp the operator's typed joints can satisfy the polygon
+        # while the IK-picked elbow doesn't (or vice versa), so we check the
+        # constraints directly on the requested joints.
+        for axis, value in zip(("J1", "J2", "J3", "J4"), (j1, j2, j3, j4)):
+            low, high = self.bounds.joint_ranges_deg[axis]
+            if not (low <= value <= high):
+                print(
+                    f"joint_mov_j REJECT [JOINT_OUT_OF_RANGE]: "
+                    f"{axis}={value:.2f}° not in [{low}, {high}]"
+                )
+                return
+        for constraint in self.bounds.coupling:
+            lhs = constraint.j2_coeff * j2 + constraint.j3_coeff * j3
+            if lhs > constraint.max_value:
+                print(
+                    f"joint_mov_j REJECT [COUPLING_VIOLATED]: "
+                    f"{constraint.label}: {lhs:.2f} > {constraint.max_value} "
+                    f"(j2={j2:.2f}, j3={j3:.2f})"
+                )
+                return
+
+        print(
+            f"joint_mov_j: target=({j1:.1f},{j2:.1f},{j3:.1f},{j4:.1f}) "
+            f"speed={speed if speed is not None else 'default'}"
+        )
+        mov_kwargs = {} if speed is None else {"speed_j": speed}
+        try:
+            ack = self.move.joint_mov_j(j1, j2, j3, j4, **mov_kwargs)
+        except Exception as e:
+            print(f"joint_mov_j: send error: {e}")
+            return
+        if ack.error_id != 0:
+            print(f"joint_mov_j: queue rejected — error {ack.error_id}: {ack.raw}")
+            return
+
+        await self._await_motion_complete("joint_mov_j")
+
     async def cmd_mode(self):
         """Query robot mode via dashboard."""
         if not self.dashboard:
@@ -724,6 +1074,9 @@ class Workbench:
                     print("  stop_drag    - Leave drag/teach mode")
                     print("  probe_start <J2>  - Auto-position to (0, J2, 46, 0) for T7B coupling probe")
                     print("  jog <axis> <±deg> - Step single joint (e.g. jog j3 +1, jog j2 -5)")
+                    print("  move_l <x> <y> <z> <r> [speed] - Linear move (safety-gated)")
+                    print("  joint_mov_j <j1> <j2> <j3> <j4> [speed] - Absolute joint move")
+                    print("  demo_loop [iters] [speed] - Phase 5 T9 demo: cycle 4-pose sequence")
                     print("  mode         - Query robot mode")
                     print("  version      - Query version")
                     print("  sing?        - Singularity analysis")
@@ -752,6 +1105,12 @@ class Workbench:
                     await self.cmd_probe_start(args)
                 elif cmd == "jog":
                     await self.cmd_jog(args)
+                elif cmd == "move_l":
+                    await self.cmd_move_l(args)
+                elif cmd == "joint_mov_j":
+                    await self.cmd_joint_mov_j(args)
+                elif cmd == "demo_loop":
+                    await self.cmd_demo_loop(args)
                 elif cmd == "mode":
                     await self.cmd_mode()
                 elif cmd == "version":

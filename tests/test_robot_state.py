@@ -128,5 +128,95 @@ class WaitForChangeTests(unittest.IsolatedAsyncioTestCase):
             await state.wait_for_change(timeout=0.02)
 
 
+class WaitForPredicateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resolves_instantly_when_current_already_satisfies(self):
+        state = RobotState()
+        state.update(_frame(mode=5))
+        snap = await state.wait_for(lambda s: s.robot_mode == 5, timeout=0.02)
+        self.assertEqual(snap.robot_mode, 5)
+
+    async def test_resolves_on_next_matching_edge(self):
+        state = RobotState()
+        state.update(_frame(mode=7))  # current does not satisfy
+
+        async def trigger():
+            await asyncio.sleep(0.01)
+            state.update(_frame(mode=5))
+
+        task = asyncio.create_task(trigger())
+        snap = await state.wait_for(lambda s: s.robot_mode == 5, timeout=1.0)
+        self.assertEqual(snap.robot_mode, 5)
+        await task
+
+    async def test_ignores_non_matching_intermediate_edges(self):
+        state = RobotState()
+        state.update(_frame(mode=5))  # baseline
+
+        async def trigger():
+            await asyncio.sleep(0.005)
+            state.update(_frame(mode=7))  # ignored
+            await asyncio.sleep(0.005)
+            state.update(_frame(mode=9))  # matches
+
+        task = asyncio.create_task(trigger())
+        snap = await state.wait_for(
+            lambda s: s.robot_mode in (9,) or s.has_error, timeout=1.0
+        )
+        self.assertEqual(snap.robot_mode, 9)
+        await task
+
+    async def test_times_out_when_predicate_never_satisfied(self):
+        state = RobotState()
+        state.update(_frame(mode=5))
+
+        async def trigger():
+            await asyncio.sleep(0.005)
+            state.update(_frame(mode=7))  # never matches mode==9
+
+        task = asyncio.create_task(trigger())
+        with self.assertRaises(asyncio.TimeoutError):
+            await state.wait_for(lambda s: s.robot_mode == 9, timeout=0.05)
+        await task
+
+    async def test_predicate_exception_propagates_and_unsubscribes(self):
+        state = RobotState()
+        state.update(_frame(mode=7))  # current does not satisfy first call
+
+        async def trigger():
+            await asyncio.sleep(0.005)
+            state.update(_frame(mode=5))
+
+        task = asyncio.create_task(trigger())
+
+        def bad_predicate(snap):
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            await state.wait_for(bad_predicate, timeout=1.0)
+        await task
+
+        # No zombie subscriber left: a subsequent edge fires nothing extra.
+        delivered = []
+        unsub = state.subscribe(lambda s, c: delivered.append(s))
+        try:
+            state.update(_frame(mode=7))
+            self.assertEqual(len(delivered), 1)
+        finally:
+            unsub()
+
+    async def test_first_frame_satisfies_predicate_via_edge(self):
+        # No baseline snapshot — first update arrives after wait_for begins.
+        state = RobotState()
+
+        async def trigger():
+            await asyncio.sleep(0.005)
+            state.update(_frame(mode=5))
+
+        task = asyncio.create_task(trigger())
+        snap = await state.wait_for(lambda s: s.robot_mode == 5, timeout=1.0)
+        self.assertEqual(snap.robot_mode, 5)
+        await task
+
+
 if __name__ == "__main__":
     unittest.main()
