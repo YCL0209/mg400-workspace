@@ -45,12 +45,21 @@ class CharucoSpec:
     """Physical + cv2 metadata for a ChArUco board.
 
     Dimensions in millimeters; ``make_board()`` converts to meters for cv2.
+
+    Default sizing: 7x10 squares x 20 mm = 140x200 mm board, fits A4
+    portrait with a 20 mm white margin on every side (total 180x240 mm).
+    A4 is the practical default in offices / labs without A3 printers.
+    54 chess corners + DICT_4X4_50 markers is enough to solve K for a
+    1440x1080 sensor at 20-40 cm working distance (each 20 mm square
+    covers ~75 px on the sensor at 30 cm with an 8 mm lens). Calibration
+    accuracy at this size is comparable to A3 because corner count and
+    marker dictionary are unchanged -- only the physical extent shrinks.
     """
 
     squares_x: int = 7
     squares_y: int = 10
-    square_size_mm: float = 30.0
-    marker_size_mm: float = 22.0
+    square_size_mm: float = 20.0
+    marker_size_mm: float = 15.0
     dictionary_name: str = "DICT_4X4_50"
 
     def to_dict(self) -> dict:

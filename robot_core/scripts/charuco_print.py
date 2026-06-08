@@ -4,12 +4,14 @@ Run::
 
     python -m robot_core.scripts.charuco_print
 
-Outputs ``outputs/charuco_board.png`` sized for A3 printing at 300 DPI.
-The board image is centered on a white canvas with a margin for cutting +
-mounting on rigid backing without clipping markers. **Print at 100% scale
-(no "fit-to-page")** so the printed square edges match the spec in
-``robot_core/calibration/charuco.py`` -- the calibration solver relies on
-those physical dimensions for K's unit interpretation.
+Outputs ``outputs/charuco_board.png`` at the physical size dictated by
+``CHARUCO_BOARD`` in ``robot_core/calibration/charuco.py`` -- default is
+180x240 mm canvas (140x200 mm board + 20 mm white margin) which fits A4
+portrait. Change the spec defaults if a different paper size is needed.
+
+**Print at 100% scale (no "fit-to-page")** so the printed square edges
+match the spec mm -- the calibration solver relies on those physical
+dimensions for K's unit interpretation.
 """
 
 from __future__ import annotations
@@ -92,8 +94,9 @@ def main() -> int:
     print(f"  saved: {out_path}")
     print(f"  size:  {out_path.stat().st_size / 1024:.1f} KB")
     print("=" * 60)
+    paper = "A4" if total_w_mm <= 210 and total_h_mm <= 297 else "A3 or larger"
     print(
-        "Print at 100% scale (no fit-to-page) on A3 paper for correct "
+        f"Print at 100% scale (no fit-to-page) on {paper} paper for correct "
         "dimensions; mount on rigid cardboard before use."
     )
     return 0

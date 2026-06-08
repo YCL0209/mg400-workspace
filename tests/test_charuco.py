@@ -25,8 +25,8 @@ class TestCharucoSpec(unittest.TestCase):
         spec = CHARUCO_BOARD
         self.assertEqual(spec.squares_x, 7)
         self.assertEqual(spec.squares_y, 10)
-        self.assertAlmostEqual(spec.square_size_mm, 30.0)
-        self.assertAlmostEqual(spec.marker_size_mm, 22.0)
+        self.assertAlmostEqual(spec.square_size_mm, 20.0)
+        self.assertAlmostEqual(spec.marker_size_mm, 15.0)
         self.assertEqual(spec.dictionary_name, "DICT_4X4_50")
 
     def test_marker_is_smaller_than_square(self):
@@ -53,10 +53,10 @@ class TestCharucoSpec(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(d)), d)
 
     def test_custom_spec_is_still_a_valid_dataclass(self):
-        custom = CharucoSpec(squares_x=5, squares_y=7, square_size_mm=20.0)
+        custom = CharucoSpec(squares_x=5, squares_y=7, square_size_mm=30.0)
         self.assertEqual(custom.squares_x, 5)
         # Marker size default kept; future scripts should override consistently.
-        self.assertEqual(custom.marker_size_mm, 22.0)
+        self.assertEqual(custom.marker_size_mm, 15.0)
 
 
 @unittest.skipUnless(HAS_CV2, "opencv-contrib-python not installed")
