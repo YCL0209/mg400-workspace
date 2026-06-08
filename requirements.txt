@@ -17,3 +17,9 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 # Pulled in by fastapi.testclient (TestClient is a Starlette helper).
 httpx>=0.27
+
+# Pillow saves camera frames as PNG (robot_core/scripts/camera_smoke.py and
+# the M0b/M0c calibration scripts). Already installed via phase5-panel for
+# Win operators, but listed explicitly so a fresh venv works without extra
+# manual installs.
+Pillow>=10.0
