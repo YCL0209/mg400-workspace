@@ -27,3 +27,8 @@ httpx>=0.27
 # Win operators, but listed explicitly so a fresh venv works without extra
 # manual installs.
 Pillow>=10.0
+
+# opencv-contrib-python (NOT plain opencv-python) for ChArUco calibration
+# board + cv2.aruco. The plain package lacks the contrib aruco submodule;
+# co-installing both causes import conflicts so use contrib only.
+opencv-contrib-python>=4.10
