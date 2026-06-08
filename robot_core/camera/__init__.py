@@ -108,48 +108,64 @@ class DeltaCamera:
             for iface_idx in range(n_interfaces):
                 try:
                     interface = DmvSDK.DcSystemGetInterface(system, iface_idx)
-                    DmvSDK.DcInterfaceUpdateDeviceList(interface, _ENUMERATION_TIMEOUT_MS)
-                    n_devs = DmvSDK.DcInterfaceGetDeviceCount(interface)
                 except RuntimeError as e:
                     devices.append({
                         "interface_index": iface_idx,
-                        "error": f"interface walk failed: {e}",
+                        "error": f"DcSystemGetInterface: {e}",
                     })
                     continue
 
-                for dev_idx in range(n_devs):
-                    try:
-                        device = DmvSDK.DcInterfaceGetDevice(interface, dev_idx)
-                    except RuntimeError as e:
-                        devices.append({
+                try:
+                    DmvSDK.DcInterfaceOpen(interface)
+                except RuntimeError as e:
+                    devices.append({
+                        "interface_index": iface_idx,
+                        "error": f"DcInterfaceOpen: {e}",
+                    })
+                    continue
+
+                # All info reads + iteration must happen inside this try —
+                # DcInterfaceClose destroys the underlying devices so we
+                # snapshot to plain dicts before closing.
+                try:
+                    DmvSDK.DcInterfaceUpdateDeviceList(interface, _ENUMERATION_TIMEOUT_MS)
+                    n_devs = DmvSDK.DcInterfaceGetDeviceCount(interface)
+
+                    for dev_idx in range(n_devs):
+                        try:
+                            device = DmvSDK.DcInterfaceGetDevice(interface, dev_idx)
+                        except RuntimeError as e:
+                            devices.append({
+                                "interface_index": iface_idx,
+                                "device_index": dev_idx,
+                                "flat_index": flat_index,
+                                "error": f"DcInterfaceGetDevice: {e}",
+                            })
+                            flat_index += 1
+                            continue
+
+                        info: dict = {
                             "interface_index": iface_idx,
                             "device_index": dev_idx,
                             "flat_index": flat_index,
-                            "error": f"DcInterfaceGetDevice: {e}",
-                        })
+                        }
+                        for key, sdk_attr in [
+                            ("display_name", "DC_DEVICE_INFO_DISPLAY_NAME"),
+                            ("serial", "DC_DEVICE_INFO_SERIAL_NUMBER"),
+                            ("user_defined_name", "DC_DEVICE_INFO_USER_DEFINED_NAME"),
+                            ("model", "DC_DEVICE_INFO_MODEL"),
+                            ("vendor", "DC_DEVICE_INFO_VENDOR"),
+                            ("version", "DC_DEVICE_INFO_VERSION"),
+                        ]:
+                            try:
+                                const = getattr(DmvSDK, sdk_attr)
+                                info[key] = DmvSDK.DcDeviceGetInfo(device, const)
+                            except (AttributeError, RuntimeError) as e:
+                                info[key] = f"<unavailable: {type(e).__name__}>"
+                        devices.append(info)
                         flat_index += 1
-                        continue
-
-                    info: dict = {
-                        "interface_index": iface_idx,
-                        "device_index": dev_idx,
-                        "flat_index": flat_index,
-                    }
-                    for key, sdk_attr in [
-                        ("display_name", "DC_DEVICE_INFO_DISPLAY_NAME"),
-                        ("serial", "DC_DEVICE_INFO_SERIAL_NUMBER"),
-                        ("user_defined_name", "DC_DEVICE_INFO_USER_DEFINED_NAME"),
-                        ("model", "DC_DEVICE_INFO_MODEL"),
-                        ("vendor", "DC_DEVICE_INFO_VENDOR"),
-                        ("version", "DC_DEVICE_INFO_VERSION"),
-                    ]:
-                        try:
-                            const = getattr(DmvSDK, sdk_attr)
-                            info[key] = DmvSDK.DcDeviceGetInfo(device, const)
-                        except (AttributeError, RuntimeError) as e:
-                            info[key] = f"<unavailable: {type(e).__name__}>"
-                    devices.append(info)
-                    flat_index += 1
+                finally:
+                    DmvSDK.DcInterfaceClose(interface)
             return devices
         finally:
             DmvSDK.DcSystemDestroy(system)
@@ -185,37 +201,56 @@ class DeltaCamera:
             flat = 0
             for iface_idx in range(n_ifaces):
                 iface = DmvSDK.DcSystemGetInterface(self.system, iface_idx)
-                DmvSDK.DcInterfaceUpdateDeviceList(iface, _ENUMERATION_TIMEOUT_MS)
-                n_devs = DmvSDK.DcInterfaceGetDeviceCount(iface)
-                for dev_idx in range(n_devs):
-                    if flat == self._requested_index:
-                        return DmvSDK.DcInterfaceGetDevice(iface, dev_idx)
-                    flat += 1
+                DmvSDK.DcInterfaceOpen(iface)
+                keep_open = False
+                try:
+                    DmvSDK.DcInterfaceUpdateDeviceList(iface, _ENUMERATION_TIMEOUT_MS)
+                    n_devs = DmvSDK.DcInterfaceGetDeviceCount(iface)
+                    for dev_idx in range(n_devs):
+                        if flat == self._requested_index:
+                            keep_open = True
+                            return DmvSDK.DcInterfaceGetDevice(iface, dev_idx)
+                        flat += 1
+                finally:
+                    # Closing destroys the device we returned, so only
+                    # close interfaces that don't hold our target.
+                    if not keep_open:
+                        DmvSDK.DcInterfaceClose(iface)
             raise RuntimeError(
                 f"no camera at flat index {self._requested_index} "
                 f"(only {flat} cameras total)"
             )
 
-        # Default: first device + warn if more than one present anywhere.
+        # Default: count first (warn if >1), THEN ask the SDK for the
+        # first device. Counting happens via interface walk; closing those
+        # interfaces is safe because we haven't requested a device yet —
+        # DcSystemGetDevice(system, None) does its own interface lifecycle
+        # internally for the hint=None path.
+        total = 0
+        try:
+            DmvSDK.DcSystemUpdateInterfaceList(self.system, _ENUMERATION_TIMEOUT_MS)
+            n_ifaces = DmvSDK.DcSystemGetInterfaceCount(self.system)
+            for iface_idx in range(n_ifaces):
+                iface = DmvSDK.DcSystemGetInterface(self.system, iface_idx)
+                DmvSDK.DcInterfaceOpen(iface)
+                try:
+                    DmvSDK.DcInterfaceUpdateDeviceList(iface, _ENUMERATION_TIMEOUT_MS)
+                    total += DmvSDK.DcInterfaceGetDeviceCount(iface)
+                finally:
+                    DmvSDK.DcInterfaceClose(iface)
+        except (AttributeError, RuntimeError):
+            total = 0  # walk failed; skip warning, fall through
+
         dev = DmvSDK.DcSystemGetDevice(self.system, None)
         if dev is None:
             raise RuntimeError("No camera found — check power + cable")
-        try:
-            DmvSDK.DcSystemUpdateInterfaceList(self.system, _ENUMERATION_TIMEOUT_MS)
-            total = 0
-            for iface_idx in range(DmvSDK.DcSystemGetInterfaceCount(self.system)):
-                iface = DmvSDK.DcSystemGetInterface(self.system, iface_idx)
-                DmvSDK.DcInterfaceUpdateDeviceList(iface, _ENUMERATION_TIMEOUT_MS)
-                total += DmvSDK.DcInterfaceGetDeviceCount(iface)
-            if total > 1:
-                logger.warning(
-                    "multiple cameras detected (%d total across interfaces); "
-                    "opened the first. Pass serial=... to pin a specific one; "
-                    "see `python -m robot_core.scripts.list_cameras`.",
-                    total,
-                )
-        except (AttributeError, RuntimeError):
-            pass  # walk failed, can't warn but default device still works
+        if total > 1:
+            logger.warning(
+                "multiple cameras detected (%d total across interfaces); "
+                "opened the first. Pass serial=... to pin a specific one; "
+                "see `python -m robot_core.scripts.list_cameras`.",
+                total,
+            )
         return dev
 
     def open(self) -> None:
