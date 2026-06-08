@@ -21,7 +21,10 @@
 - CV 專案 `phase5-panel` 實為**配電盤 AOI 異常檢測**(PatchCore/anomalib)。其 ArUco(`DICT_4X4_50`, ID 0)
   只用於 `findHomography` **影像對齊**,**與機械臂座標無關**;且**無相機內參、無手眼標定、無手臂通訊**。
   → 要把「相機看哪」畫進機械臂座標,**內參 + 手眼標定是缺的前置(本設計 Step 0)**。
-- 相機:台達 DeltaCamera(DMV-SDK),解析度 **1280×960**。
+- 相機:台達 DeltaCamera(DMV-SDK)。實機型號 `DMV-CC1M6GM075`(GigE,**monochrome** Mono8),
+  解析度 **1440×1080**(M0a smoke 實測確認;舊版本本檔誤寫 1280×960,已修正)。
+  Wrapper 把 Mono8 broadcast 成三通道 RGB(R=G=B),下游模型一律拿到 `(H,W,3) uint8`,
+  跟彩色相機相容;但 ChArUco/AOI 實際只用一個通道,無資訊損失。
 
 ---
 
