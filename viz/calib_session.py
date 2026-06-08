@@ -151,24 +151,27 @@ class CalibSession:
         return None
 
     def solve(self) -> CalibResultMessage:
-        """M0b-2 stub. M0b-4 will fill in cv2.aruco.calibrateCameraCharuco."""
-        # Bare-minimum precondition that's worth checking now: cv2's solver
-        # needs at least a few views. Reject early with a useful message
-        # rather than returning a confusing NaN K matrix once the real
-        # solver is wired.
+        """M0b-2 stub. M0b-4 will fill in cv2.aruco.calibrateCameraCharuco.
+
+        Failure messages omit ``rms_px`` entirely rather than sending NaN --
+        Python's json.dumps default emits ``NaN`` as a bare literal, which
+        is invalid JSON per RFC 7159 and rejected by browser JSON.parse
+        with a SyntaxError. The ws layer would then silently drop the
+        message and the operator wouldn't see solve feedback. M0b-4 will
+        populate rms_px with a real float on success; failure paths leave
+        it absent (allowed by CalibResultMessage total=False).
+        """
         if len(self._samples) < 3:
             return CalibResultMessage(
                 type="calib_result",
                 success=False,
                 n_views=len(self._samples),
-                rms_px=float("nan"),
                 error="need at least 3 captured views (cv2 minimum)",
             )
         return CalibResultMessage(
             type="calib_result",
             success=False,
             n_views=len(self._samples),
-            rms_px=float("nan"),
             error="solve not implemented yet -- M0b-4 will wire calibrateCameraCharuco",
         )
 
