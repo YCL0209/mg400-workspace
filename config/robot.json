@@ -15,6 +15,6 @@
     "host": "localhost",
     "port": 8765,
     "grid_step_mm": 50,
-    "camera_serial": null
+    "camera_serial": "C1M6GM0W24460005"
   }
 }
