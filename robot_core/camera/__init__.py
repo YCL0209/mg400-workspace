@@ -48,28 +48,152 @@ class DeltaCamera:
     Single mode raises ``RuntimeError`` on failure; continuous mode returns
     ``None`` so the caller's frame loop survives transient drops — a
     deliberate split (see docs/dmv_sdk.md §6).
+
+    Multi-camera selection: pass ``serial=...`` to pick a specific device when
+    multiple cameras share a hub (same model is hard to distinguish otherwise).
+    Pass ``device_index=...`` as a debug fallback if serial reading is broken.
+    With neither, opens the first enumerated device and logs a warning if more
+    than one is present. Use :meth:`list_devices` to discover serials.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        serial: str | None = None,
+        device_index: int | None = None,
+    ) -> None:
+        if serial is not None and device_index is not None:
+            raise ValueError("specify serial OR device_index, not both")
+        self._requested_serial = serial
+        self._requested_index = device_index
         self.system = None
         self.device = None
         self.data_stream = None
         self.buffer = None
         self.is_open = False
 
+    @classmethod
+    def list_devices(cls) -> list[dict]:
+        """Enumerate all connected DMV cameras.
+
+        Returns a list of ``{index, display_name, serial, user_id, model}``
+        dicts so the operator can pick the right one by serial when several
+        same-model cameras share a hub.
+
+        SDK API names are best-guesses from GenICam conventions (the public
+        docs only show ``DcSystemGetDevice(system, None)``). If the installed
+        DMV exposes different names, the per-field lookups fall back to
+        ``"<unavailable: ...>"`` rather than crashing — fix the names + log
+        a finding once the real SDK surface is observed.
+        """
+        if not HAS_DMV_SDK:
+            raise RuntimeError(_DMV_SDK_MISSING_MSG)
+
+        system = DmvSDK.DcSystemCreate()
+        try:
+            try:
+                count = DmvSDK.DcSystemGetDeviceCount(system)
+            except AttributeError:
+                raise RuntimeError(
+                    "DcSystemGetDeviceCount not in DmvSDK — enumeration API "
+                    "name is a guess. Inspect `dir(DmvSDK)` on the install "
+                    "and update list_devices() accordingly."
+                )
+
+            devices: list[dict] = []
+            for i in range(count):
+                try:
+                    dev = DmvSDK.DcSystemGetDevice(system, i)
+                except Exception as e:
+                    devices.append({"index": i, "error": f"{type(e).__name__}: {e}"})
+                    continue
+                if dev is None:
+                    devices.append({"index": i, "error": "DcSystemGetDevice returned None"})
+                    continue
+
+                info: dict = {"index": i}
+                _attr_map = [
+                    ("display_name", "DC_DEVICE_INFO_DISPLAY_NAME"),
+                    ("serial", "DC_DEVICE_INFO_SERIAL_NUMBER"),
+                    ("user_id", "DC_DEVICE_INFO_USER_ID"),
+                    ("model", "DC_DEVICE_INFO_MODEL"),
+                ]
+                for key, sdk_attr in _attr_map:
+                    try:
+                        const = getattr(DmvSDK, sdk_attr)
+                        info[key] = DmvSDK.DcDeviceGetInfo(dev, const)
+                    except (AttributeError, RuntimeError) as e:
+                        info[key] = f"<unavailable: {type(e).__name__}>"
+                devices.append(info)
+            return devices
+        finally:
+            DmvSDK.DcSystemDestroy(system)
+
+    def _select_device(self):
+        """Resolve which device to open per __init__ requested_serial/index."""
+        if self._requested_serial is not None:
+            try:
+                count = DmvSDK.DcSystemGetDeviceCount(self.system)
+            except AttributeError:
+                raise RuntimeError(
+                    "cannot select by serial: DcSystemGetDeviceCount unavailable; "
+                    "fall back to device_index= or fix list_devices() API names"
+                )
+            for i in range(count):
+                dev = DmvSDK.DcSystemGetDevice(self.system, i)
+                if dev is None:
+                    continue
+                try:
+                    serial = DmvSDK.DcDeviceGetInfo(
+                        dev, DmvSDK.DC_DEVICE_INFO_SERIAL_NUMBER
+                    )
+                except (AttributeError, RuntimeError):
+                    continue
+                if str(serial) == str(self._requested_serial):
+                    logger.info("matched camera serial %s at index %d", serial, i)
+                    return dev
+            raise RuntimeError(
+                f"no camera matching serial {self._requested_serial!r}; "
+                "run `python -m robot_core.scripts.list_cameras` to see all"
+            )
+
+        if self._requested_index is not None:
+            dev = DmvSDK.DcSystemGetDevice(self.system, self._requested_index)
+            if dev is None:
+                raise RuntimeError(f"no camera at index {self._requested_index}")
+            return dev
+
+        # No selection → first device + warn if multiple present.
+        dev = DmvSDK.DcSystemGetDevice(self.system, None)
+        if dev is None:
+            raise RuntimeError("No camera found — check power + cable")
+        try:
+            count = DmvSDK.DcSystemGetDeviceCount(self.system)
+            if count > 1:
+                logger.warning(
+                    "multiple cameras detected (%d); opened the first. "
+                    "Pass serial=... to pick a specific one; "
+                    "use scripts/list_cameras.py to enumerate.",
+                    count,
+                )
+        except AttributeError:
+            pass  # No count API; can't warn but default works
+        return dev
+
     def open(self) -> None:
-        """Connect to the first available camera (DmvSDK steps 1–5)."""
+        """Connect to the requested camera (DmvSDK steps 1–5)."""
         if not HAS_DMV_SDK:
             raise RuntimeError(_DMV_SDK_MISSING_MSG)
 
         # Step 1: create SDK system instance
         self.system = DmvSDK.DcSystemCreate()
 
-        # Step 2: enumerate first device
-        self.device = DmvSDK.DcSystemGetDevice(self.system, None)
-        if self.device is None:
+        # Step 2: enumerate + select device per __init__ params
+        try:
+            self.device = self._select_device()
+        except RuntimeError:
             self._cleanup()
-            raise RuntimeError("No camera found — check power + cable")
+            raise
 
         # Step 3: open device in exclusive control mode
         DmvSDK.DcDeviceOpen(self.device, DmvSDK.DC_DEVICE_ACCESS_TYPE_CONTROL)
