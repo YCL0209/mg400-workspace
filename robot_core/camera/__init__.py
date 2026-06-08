@@ -76,108 +76,140 @@ class DeltaCamera:
     def list_devices(cls) -> list[dict]:
         """Enumerate all connected DMV cameras.
 
-        Returns a list of ``{index, display_name, serial, user_id, model}``
-        dicts so the operator can pick the right one by serial when several
-        same-model cameras share a hub.
+        Walks the GenTL hierarchy ``System → Interface → Device``: for each
+        interface (USB controller / GigE NIC), refresh its device list and
+        emit one dict per device with ``interface_index``, ``device_index``,
+        ``display_name``, ``serial``, ``user_defined_name``, ``model``,
+        ``vendor``, ``version``. Each info lookup is guarded so a single
+        unknown constant doesn't abort the whole enumeration.
 
-        SDK API names are best-guesses from GenICam conventions (the public
-        docs only show ``DcSystemGetDevice(system, None)``). If the installed
-        DMV exposes different names, the per-field lookups fall back to
-        ``"<unavailable: ...>"`` rather than crashing — fix the names + log
-        a finding once the real SDK surface is observed.
+        ``device_index`` here is the per-interface index expected by
+        :func:`DcInterfaceGetDevice`; it is *not* the flat index callers pass
+        to :class:`DeltaCamera` via ``device_index=``. The flat index is the
+        sequence number across all interfaces, which :meth:`_select_device`
+        re-walks the same way to resolve.
         """
         if not HAS_DMV_SDK:
             raise RuntimeError(_DMV_SDK_MISSING_MSG)
 
         system = DmvSDK.DcSystemCreate()
         try:
-            try:
-                count = DmvSDK.DcSystemGetDeviceCount(system)
-            except AttributeError:
-                raise RuntimeError(
-                    "DcSystemGetDeviceCount not in DmvSDK — enumeration API "
-                    "name is a guess. Inspect `dir(DmvSDK)` on the install "
-                    "and update list_devices() accordingly."
-                )
+            DmvSDK.DcSystemUpdateInterfaceList(system)
+            n_interfaces = DmvSDK.DcSystemGetInterfaceCount(system)
 
             devices: list[dict] = []
-            for i in range(count):
+            flat_index = 0
+            for iface_idx in range(n_interfaces):
                 try:
-                    dev = DmvSDK.DcSystemGetDevice(system, i)
-                except Exception as e:
-                    devices.append({"index": i, "error": f"{type(e).__name__}: {e}"})
-                    continue
-                if dev is None:
-                    devices.append({"index": i, "error": "DcSystemGetDevice returned None"})
+                    interface = DmvSDK.DcSystemGetInterface(system, iface_idx)
+                    DmvSDK.DcInterfaceUpdateDeviceList(interface)
+                    n_devs = DmvSDK.DcInterfaceGetDeviceCount(interface)
+                except RuntimeError as e:
+                    devices.append({
+                        "interface_index": iface_idx,
+                        "error": f"interface walk failed: {e}",
+                    })
                     continue
 
-                info: dict = {"index": i}
-                _attr_map = [
-                    ("display_name", "DC_DEVICE_INFO_DISPLAY_NAME"),
-                    ("serial", "DC_DEVICE_INFO_SERIAL_NUMBER"),
-                    ("user_id", "DC_DEVICE_INFO_USER_ID"),
-                    ("model", "DC_DEVICE_INFO_MODEL"),
-                ]
-                for key, sdk_attr in _attr_map:
+                for dev_idx in range(n_devs):
                     try:
-                        const = getattr(DmvSDK, sdk_attr)
-                        info[key] = DmvSDK.DcDeviceGetInfo(dev, const)
-                    except (AttributeError, RuntimeError) as e:
-                        info[key] = f"<unavailable: {type(e).__name__}>"
-                devices.append(info)
+                        device = DmvSDK.DcInterfaceGetDevice(interface, dev_idx)
+                    except RuntimeError as e:
+                        devices.append({
+                            "interface_index": iface_idx,
+                            "device_index": dev_idx,
+                            "flat_index": flat_index,
+                            "error": f"DcInterfaceGetDevice: {e}",
+                        })
+                        flat_index += 1
+                        continue
+
+                    info: dict = {
+                        "interface_index": iface_idx,
+                        "device_index": dev_idx,
+                        "flat_index": flat_index,
+                    }
+                    for key, sdk_attr in [
+                        ("display_name", "DC_DEVICE_INFO_DISPLAY_NAME"),
+                        ("serial", "DC_DEVICE_INFO_SERIAL_NUMBER"),
+                        ("user_defined_name", "DC_DEVICE_INFO_USER_DEFINED_NAME"),
+                        ("model", "DC_DEVICE_INFO_MODEL"),
+                        ("vendor", "DC_DEVICE_INFO_VENDOR"),
+                        ("version", "DC_DEVICE_INFO_VERSION"),
+                    ]:
+                        try:
+                            const = getattr(DmvSDK, sdk_attr)
+                            info[key] = DmvSDK.DcDeviceGetInfo(device, const)
+                        except (AttributeError, RuntimeError) as e:
+                            info[key] = f"<unavailable: {type(e).__name__}>"
+                    devices.append(info)
+                    flat_index += 1
             return devices
         finally:
             DmvSDK.DcSystemDestroy(system)
 
     def _select_device(self):
-        """Resolve which device to open per __init__ requested_serial/index."""
-        if self._requested_serial is not None:
-            try:
-                count = DmvSDK.DcSystemGetDeviceCount(self.system)
-            except AttributeError:
-                raise RuntimeError(
-                    "cannot select by serial: DcSystemGetDeviceCount unavailable; "
-                    "fall back to device_index= or fix list_devices() API names"
-                )
-            for i in range(count):
-                dev = DmvSDK.DcSystemGetDevice(self.system, i)
-                if dev is None:
-                    continue
-                try:
-                    serial = DmvSDK.DcDeviceGetInfo(
-                        dev, DmvSDK.DC_DEVICE_INFO_SERIAL_NUMBER
-                    )
-                except (AttributeError, RuntimeError):
-                    continue
-                if str(serial) == str(self._requested_serial):
-                    logger.info("matched camera serial %s at index %d", serial, i)
-                    return dev
-            raise RuntimeError(
-                f"no camera matching serial {self._requested_serial!r}; "
-                "run `python -m robot_core.scripts.list_cameras` to see all"
-            )
+        """Resolve which device to open per __init__ requested serial/index.
 
-        if self._requested_index is not None:
-            dev = DmvSDK.DcSystemGetDevice(self.system, self._requested_index)
+        Three paths:
+
+        * ``serial`` set → build a ``DcDeviceSerialNumberHint`` and let
+          :func:`DcSystemGetDevice` find the match natively; cheap because
+          the SDK does the enumeration internally.
+        * ``device_index`` set → walk ``System → Interface → Device`` and
+          stop at the Nth device across all interfaces (a *flat* index).
+        * Neither → ``DcSystemGetDevice(system, None)`` for the first
+          available device; if a quick walk turns up >1 device anywhere,
+          log a warning telling the operator to pin a serial.
+        """
+        if self._requested_serial is not None:
+            hint = DmvSDK.DcDeviceSerialNumberHint(str(self._requested_serial))
+            dev = DmvSDK.DcSystemGetDevice(self.system, hint)
             if dev is None:
-                raise RuntimeError(f"no camera at index {self._requested_index}")
+                raise RuntimeError(
+                    f"no camera matching serial {self._requested_serial!r}; "
+                    "run `python -m robot_core.scripts.list_cameras` to enumerate"
+                )
+            logger.info("matched camera by serial %s", self._requested_serial)
             return dev
 
-        # No selection → first device + warn if multiple present.
+        if self._requested_index is not None:
+            DmvSDK.DcSystemUpdateInterfaceList(self.system)
+            n_ifaces = DmvSDK.DcSystemGetInterfaceCount(self.system)
+            flat = 0
+            for iface_idx in range(n_ifaces):
+                iface = DmvSDK.DcSystemGetInterface(self.system, iface_idx)
+                DmvSDK.DcInterfaceUpdateDeviceList(iface)
+                n_devs = DmvSDK.DcInterfaceGetDeviceCount(iface)
+                for dev_idx in range(n_devs):
+                    if flat == self._requested_index:
+                        return DmvSDK.DcInterfaceGetDevice(iface, dev_idx)
+                    flat += 1
+            raise RuntimeError(
+                f"no camera at flat index {self._requested_index} "
+                f"(only {flat} cameras total)"
+            )
+
+        # Default: first device + warn if more than one present anywhere.
         dev = DmvSDK.DcSystemGetDevice(self.system, None)
         if dev is None:
             raise RuntimeError("No camera found — check power + cable")
         try:
-            count = DmvSDK.DcSystemGetDeviceCount(self.system)
-            if count > 1:
+            DmvSDK.DcSystemUpdateInterfaceList(self.system)
+            total = 0
+            for iface_idx in range(DmvSDK.DcSystemGetInterfaceCount(self.system)):
+                iface = DmvSDK.DcSystemGetInterface(self.system, iface_idx)
+                DmvSDK.DcInterfaceUpdateDeviceList(iface)
+                total += DmvSDK.DcInterfaceGetDeviceCount(iface)
+            if total > 1:
                 logger.warning(
-                    "multiple cameras detected (%d); opened the first. "
-                    "Pass serial=... to pick a specific one; "
-                    "use scripts/list_cameras.py to enumerate.",
-                    count,
+                    "multiple cameras detected (%d total across interfaces); "
+                    "opened the first. Pass serial=... to pin a specific one; "
+                    "see `python -m robot_core.scripts.list_cameras`.",
+                    total,
                 )
-        except AttributeError:
-            pass  # No count API; can't warn but default works
+        except (AttributeError, RuntimeError):
+            pass  # walk failed, can't warn but default device still works
         return dev
 
     def open(self) -> None:

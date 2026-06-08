@@ -39,10 +39,21 @@ def main() -> int:
 
     print(f"Found {len(devices)} camera(s):\n")
     for d in devices:
-        print(f"  [{d['index']}]")
-        for field in ("display_name", "model", "serial", "user_id", "error"):
+        # flat_index is what to pass as DeltaCamera(device_index=...) for
+        # debug; serial is the durable identifier for config.
+        header = f"[flat={d.get('flat_index', '?')}]  iface={d.get('interface_index', '?')} dev={d.get('device_index', '?')}"
+        print(f"  {header}")
+        for field in (
+            "display_name",
+            "model",
+            "vendor",
+            "version",
+            "serial",
+            "user_defined_name",
+            "error",
+        ):
             if field in d:
-                print(f"      {field:14s} {d[field]}")
+                print(f"      {field:20s} {d[field]}")
         print()
 
     print("Copy the desired serial into config/robot.json:")
