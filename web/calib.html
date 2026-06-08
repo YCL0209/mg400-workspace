@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MG400 calibration — M0b</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0a0a0a; color: #aaa;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+      #calib-root { display: grid; grid-template-columns: 1fr 320px; gap: 12px;
+        padding: 12px; height: 100vh; box-sizing: border-box; }
+
+      #frame-pane { background: #000; border: 1px solid #222; position: relative;
+        display: flex; align-items: center; justify-content: center; overflow: hidden; }
+      #frame { max-width: 100%; max-height: 100%; object-fit: contain;
+        image-rendering: pixelated; }
+      #overlay { position: absolute; top: 8px; left: 8px; padding: 6px 10px;
+        background: rgba(0,0,0,0.75); font-size: 12px; pointer-events: none;
+        border-radius: 3px; }
+
+      #side { padding: 8px; font-size: 13px; line-height: 1.6; overflow-y: auto; }
+      #side h2 { margin: 4px 0; font-size: 14px; color: #ddd;
+        border-bottom: 1px solid #333; padding-bottom: 4px; }
+      .stat-row { display: flex; justify-content: space-between; padding: 3px 0; }
+      .stat-row .label { color: #888; }
+      .stat-value { color: #fff; font-weight: bold; }
+      .stat-value.warn { color: #fa3; }
+      .stat-value.ok { color: #6f9; }
+      .stat-value.bad { color: #f66; }
+
+      kbd { background: #222; border: 1px solid #444; border-radius: 3px;
+        padding: 1px 6px; font-family: inherit; font-size: 11px; color: #ddd;
+        margin-right: 6px; min-width: 18px; display: inline-block; text-align: center; }
+
+      #log { margin-top: 8px; max-height: 35vh; overflow-y: auto; font-size: 11px;
+        color: #888; background: #0f0f0f; padding: 6px; border: 1px solid #222; }
+      #log .entry { padding: 1px 0; }
+      #log .entry.action { color: #7af; }
+      #log .entry.ok { color: #6f9; }
+      #log .entry.err { color: #f66; }
+    </style>
+  </head>
+  <body>
+    <div id="calib-root">
+      <div id="frame-pane">
+        <img id="frame" alt="waiting for camera stream..." />
+        <div id="overlay">waiting for first frame...</div>
+      </div>
+      <div id="side">
+        <h2>Status</h2>
+        <div class="stat-row"><span class="label">ws</span><span id="ws-state" class="stat-value warn">connecting</span></div>
+        <div class="stat-row"><span class="label">board visible</span><span id="board-stat" class="stat-value">—</span></div>
+        <div class="stat-row"><span class="label">corners</span><span id="corners-stat" class="stat-value">—</span></div>
+        <div class="stat-row"><span class="label">markers</span><span id="markers-stat" class="stat-value">—</span></div>
+        <div class="stat-row"><span class="label">captures</span><span id="captures-stat" class="stat-value">—</span></div>
+        <div class="stat-row"><span class="label">solve rms</span><span id="rms-stat" class="stat-value">—</span></div>
+
+        <h2 style="margin-top:14px">Controls</h2>
+        <div><kbd>Space</kbd> capture current frame</div>
+        <div><kbd>D</kbd> discard last capture</div>
+        <div><kbd>R</kbd> reset all captures</div>
+        <div><kbd>Enter</kbd> solve K + save artifact</div>
+
+        <h2 style="margin-top:14px">Log</h2>
+        <div id="log"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/calib_main.js"></script>
+  </body>
+</html>
