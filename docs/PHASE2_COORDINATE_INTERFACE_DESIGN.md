@@ -59,9 +59,13 @@
 沒有這兩個 artifact,FOV 框只能粗估;要畫準必須先做。兩者**互相獨立**(概念③:對應點+求解器+存檔)。
 
 ### 3.1 相機內參標定
-- 方法:棋盤格(chessboard)多角度拍 → `cv2.calibrateCamera` → `cameraMatrix K` + 畸變 `dist`。
-- 存:`config/camera_intrinsics.json`(含 `image_width/height`、`K`(3×3)、`dist`、標定日期/RMS 殘差)。
-- 一次性;換鏡頭/變焦才重做。
+- 方法:**ChArUco** 板(棋盤格 + ArUco markers)多角度拍 → `cv2.aruco.calibrateCameraCharuco` →
+  `cameraMatrix K` + 畸變 `dist`。ChArUco 比純棋盤格穩在角點識別(partial-occlusion 仍可用)。
+- 存:`config/camera_intrinsics.json`(含 `image_width/height`、`K`(3×3)、`dist`、板規格、RMS 殘差等)。
+  完整 schema 見 §8.1。
+- 採點透過**自家瀏覽器 UI**(viz/ + web/)即時看 ChArUco overlay,順手調焦/光圈,不需開 DMV Studio。
+- 一次性;換鏡頭/變焦才重做。鎖鏡頭環是 M0b 前置。
+- 詳細實作見 **§8.1 M0b 細節**。
 
 ### 3.2 手眼標定(eye-in-hand)
 - 目標:相機相對手臂的外參。建議標到 **flange**(對齊 FK 輸出)或 **TCP**(對齊 30004 `.pose`);**全程擇一**。
@@ -161,14 +165,140 @@ JSON,單位 mm / 度,位姿一律 `{x,y,z,r}`(概念⑦)。
 
 ## 8. 建置里程碑(分期,逐步落地)
 
-| 里程碑 | 內容 | 產出 | 可單獨驗證 |
+| 里程碑 | 內容 | 產出 | 狀態 |
 |---|---|---|---|
-| **M0** | Step 0 標定:內參 + 手眼腳本與 artifact | `config/camera_intrinsics.json`、`config/hand_eye.json`、`scripts/handeye_calib.py` | FOV 框目視吻合已知物 |
-| **M1** | ws 後端骨架 + 前端畫「靜態工作範圍 + 座標格」(不接相機) | `viz/` 後端 + 前端;推 `workspace` 訊息 | 瀏覽器看到正確環形+格線 |
-| **M2** | 接 30004 即時位姿 + 算/畫 FOV 框 | 推 `state`(pose/joints/fov_polygon) | 手臂動→介面手臂與框跟著動 |
-| **M3** | phase5-panel 推 AOI 結果疊框 | phase5-panel 加一個輸出 hook → 後端 `detections` | 某格判 NG→介面該格變紅 |
+| **M0a** | DeltaCamera adapter + multi-camera 選擇 + smoke | `robot_core/camera/`、`scripts/{list_,}camera_smoke.py`、camera_serial 進 config | ✅ merged `5a2eb9d` |
+| **M0b** | 相機內參標定(瀏覽器式 live capture + ChArUco) | `config/camera_intrinsics.json`、`viz/calib_*`、ChArUco 板列印腳本 | ⏳ planned (§8.1) |
+| **M0c** | 手眼校正(eye-in-hand,跟手臂同 session) | `config/hand_eye.json`、`scripts/handeye_calib.py` | 🔒 等 M0b |
+| **M0d** | sanity verify(已知物投影 vs 實放) | `scripts/handeye_verify.py` | 🔒 等 M0c |
+| **M1** | ws 後端骨架 + 前端畫「靜態工作範圍 + 座標格」(不接相機) | `viz/` 後端 + 前端;推 `workspace` 訊息 | ✅ merged `6241111` |
+| **M2** | 接 30004 即時位姿 + 算/畫 FOV 框 | 推 `state`(pose/joints/fov_polygon) | 🔒 等 M0d artifact |
+| **M3** | phase5-panel 推 AOI 結果疊框 | phase5-panel 加一個輸出 hook → 後端 `detections` | 🔒 等 M2 + hook |
 
 每個里程碑各自 **plan → build → 驗證**,不一次全建(符合 step-by-step)。
+
+---
+
+## 8.1 M0b 細節:瀏覽器式 live capture + ChArUco
+
+**目標**:從 `DeltaCamera` 抓單張 raw frame、跑 ChArUco 偵測、累積 ≥20 不同視角採樣、解 K 矩陣 +
+畸變、寫進 `config/camera_intrinsics.json`。M0c / M2 都依賴這個 artifact。
+
+**為什麼走瀏覽器(不走 cv2.imshow)**:整個 M0b 同時讓 viz/ 順手獲得「相機 stream + ChArUco overlay」
+能力,M2 / M3 順著用。調焦距 / 光圈也用同一個 UI,操作員不必在 DMV Studio + Python script 之間切。
+
+### 8.1.1 ChArUco 板規格
+
+| 參數 | 值 | 理由 |
+|---|---|---|
+| 方格數 | **7 × 10**(可調) | A3 容納合理、角點數夠 |
+| 方格邊長 | **30 mm** | 大相對畫面 / 易印準 / cv2 角點偵測穩 |
+| Marker 邊長 | **22 mm**(≈ 0.73 × 方格) | cv2.aruco 常用比例 |
+| 字典 | **DICT_4X4_50** | 跟 phase5-panel 同字典避免衝突 |
+| 紙張 | **A3 厚紙板** | 不彎不反光、易固定 |
+
+**Single source of truth**:`robot_core/calibration/charuco.py` 定義 board factory,列印腳本、偵測腳本、
+solver、artifact JSON 寫的 board metadata 全部從這拿。
+
+### 8.1.2 ws 訊息 schema 擴充(§5 補充)
+
+**(c) Live calib frame 推送(M0b)**
+
+```json
+{
+  "type": "calib_frame",
+  "jpeg_b64": "/9j/4AAQ...",
+  "timestamp_ms": 12345,
+  "detection": {
+    "charuco_corners_found": 23,
+    "charuco_corners_total": 54,
+    "board_visible": true,
+    "marker_ids": [0, 1, 2, ...]
+  },
+  "captures": {"collected": 8, "target": 20}
+}
+```
+- frame: ~5–10 fps base64 JPEG over JSON ws message。M2 高吞吐情境再考慮 binary frame。
+- detection: 偵測到的 ChArUco 角點數、ArUco marker IDs。前端疊文字 overlay。
+
+**(d) Client → backend 動作**
+
+```json
+{"action": "capture" | "discard" | "reset" | "solve"}
+```
+- `capture`: snapshot 當前 frame + detection 進 sample buffer
+- `discard`: 退最後一筆
+- `reset`: 清空
+- `solve`: 跑 `cv2.aruco.calibrateCameraCharuco` 解、回 `calib_result`
+
+**(e) Solve 結果**
+
+```json
+{
+  "type": "calib_result",
+  "success": true,
+  "rms_px": 0.45,
+  "n_views": 23,
+  "K": [[fx,0,cx],[0,fy,cy],[0,0,1]],
+  "dist": [k1,k2,p1,p2,k3]
+}
+```
+- success=false 時帶 `error` 欄位說明(視角不足、解出 NaN 等)
+- 成功則 backend 同步寫 `config/camera_intrinsics.json`(schema §8.1.4)
+
+### 8.1.3 4 sub-PR 拆分
+
+每個獨立可 merge、各自驗收:
+
+| sub-PR | 內容 | 環境 |
+|---|---|---|
+| **M0b-1** | ChArUco 規格 + 列印腳本:`robot_core/calibration/charuco.py`、`scripts/charuco_print.py`、`opencv-contrib-python` 進 requirements | 純離線(Mac OK) |
+| **M0b-2** | viz/ 後端 live stream:`viz/calib_session.py` 包 DeltaCamera 連續模式 + 偵測、`viz/server.py` 加 `/ws/calib`、推 `calib_frame` | Win(實機相機) |
+| **M0b-3** | web/ 前端 live view:`web/src/calib.js` decode JPEG + 疊 overlay + 按鍵 binding(SPACE/ESC/R/D) | Win(連背端) |
+| **M0b-4** | Solver + artifact:`solve()` 呼叫 `cv2.aruco.calibrateCameraCharuco`、寫 `config/camera_intrinsics.json`、tests 完整 | Win(實機跑 20+ 採點) |
+
+### 8.1.4 `config/camera_intrinsics.json` schema
+
+```json
+{
+  "K": [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
+  "dist": [k1, k2, p1, p2, k3],
+  "image_width": 1440,
+  "image_height": 1080,
+  "rms_px": 0.45,
+  "n_views": 23,
+  "board": {
+    "squares_x": 7,
+    "squares_y": 10,
+    "square_size_mm": 30.0,
+    "marker_size_mm": 22.0,
+    "dictionary": "DICT_4X4_50"
+  },
+  "camera_serial": "C1M6GM0W24460005",
+  "captured_at": "2026-06-05T22:00:00",
+  "tool_version": "M0b-v1"
+}
+```
+
+驗收 acceptance:`rms_px < 1.0` 算 OK;< 0.5 是優秀;>= 1.0 採點不夠 / 太集中,重採。
+
+### 8.1.5 焦距 / 光圈調整 SOP(M0b-3 完成後)
+
+1. Win 端起 viz + 瀏覽器、進 `/ws/calib` view
+2. 鏡頭前放 ChArUco 板
+3. 觀察 overlay「corners: X/54 visible」+ 邊緣銳利度
+4. **物理調焦距**(轉鏡頭環)直到 corners 數最大 + 邊緣最銳
+5. **物理調光圈**直到曝光合理(直方圖偏中,不過亮過暗)
+6. **鎖住鏡頭環**(止動螺絲 / 鎖環)
+7. 開始 M0b-4 採點循環 — **步驟 6 之後不要再碰鏡頭,碰了校正就要重來**
+
+### 8.1.6 採點品質基準
+
+- 至少 20 個視角(target=20,buffer 提示)
+- 涵蓋畫面**各角度**:左上、右下、正中、近、遠、傾斜
+- ChArUco 板在畫面中**佔比 > 30%**(太小角點偵測不穩)
+- 每張 corners_found ≥ 30(≥ 50% 總數)
+- 完成後一張畫面看 RMS + 重投影誤差分布,大於 1.0 就重來
 
 ---
 
