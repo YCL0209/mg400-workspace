@@ -88,7 +88,13 @@ class CalibActionMessage(TypedDict):
 
 
 class CalibResultMessage(TypedDict, total=False):
-    """Solve outcome (M0b-4 will populate ``K`` / ``dist``)."""
+    """Solve outcome.
+
+    On success, all numeric fields are present + ``artifact_path`` points
+    at the saved ``config/camera_intrinsics.json``. On failure, only
+    ``success=False`` + ``error`` + ``n_views`` are set (``rms_px``
+    intentionally omitted; sending NaN breaks browser JSON.parse).
+    """
 
     type: str  # always "calib_result"
     success: bool
@@ -96,4 +102,5 @@ class CalibResultMessage(TypedDict, total=False):
     rms_px: float
     K: list  # 3x3 nested list -- only present on success
     dist: list  # [k1, k2, p1, p2, k3] -- only present on success
+    artifact_path: str  # only present on success
     error: str  # only present on failure

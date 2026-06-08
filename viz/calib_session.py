@@ -42,6 +42,7 @@ except ImportError:
 
 from robot_core.calibration.charuco import CHARUCO_BOARD, make_board
 
+from .calib_artifact import write_artifact
 from .messages import (
     CalibActionMessage,
     CalibCaptures,
@@ -80,6 +81,8 @@ class CalibSession:
         board=None,
         target_views: int = _DEFAULT_TARGET_VIEWS,
         jpeg_quality: int = _DEFAULT_JPEG_QUALITY,
+        camera_serial: Optional[str] = None,
+        artifact_path: Optional[object] = None,
     ) -> None:
         if not HAS_CV2:
             raise RuntimeError(
@@ -89,6 +92,10 @@ class CalibSession:
         self.board = board if board is not None else make_board()
         self.target_views = target_views
         self.jpeg_quality = jpeg_quality
+        self.camera_serial = camera_serial
+        # Override target path for tests; production writes to the default
+        # config/camera_intrinsics.json defined in calib_artifact.py.
+        self.artifact_path = artifact_path
 
         # Detector / refiner -- created once so detection cost is amortised
         # across frames. cv2.aruco.ArucoDetector is the OpenCV 4.7+ class
@@ -151,15 +158,17 @@ class CalibSession:
         return None
 
     def solve(self) -> CalibResultMessage:
-        """M0b-2 stub. M0b-4 will fill in cv2.aruco.calibrateCameraCharuco.
+        """Run cv2.aruco.calibrateCameraCharuco over the captured samples.
 
         Failure messages omit ``rms_px`` entirely rather than sending NaN --
         Python's json.dumps default emits ``NaN`` as a bare literal, which
         is invalid JSON per RFC 7159 and rejected by browser JSON.parse
-        with a SyntaxError. The ws layer would then silently drop the
-        message and the operator wouldn't see solve feedback. M0b-4 will
-        populate rms_px with a real float on success; failure paths leave
-        it absent (allowed by CalibResultMessage total=False).
+        with a SyntaxError. Success messages include K + dist + rms_px +
+        artifact_path so the frontend can show the result and operators
+        know where the artifact landed.
+
+        Image size comes from the first sample (all should match -- the
+        camera doesn't change resolution mid-session).
         """
         if len(self._samples) < 3:
             return CalibResultMessage(
@@ -168,11 +177,60 @@ class CalibSession:
                 n_views=len(self._samples),
                 error="need at least 3 captured views (cv2 minimum)",
             )
+
+        # cv2.aruco wants (width, height); our samples store (h, w).
+        h, w = self._samples[0].image_size
+        image_size_wh = (w, h)
+
+        all_corners = [s.corners for s in self._samples]
+        all_ids = [s.ids for s in self._samples]
+
+        try:
+            rms, K, dist, _rvecs, _tvecs = aruco.calibrateCameraCharuco(
+                all_corners, all_ids, self.board, image_size_wh, None, None
+            )
+        except cv2.error as e:
+            return CalibResultMessage(
+                type="calib_result",
+                success=False,
+                n_views=len(self._samples),
+                error=f"cv2 solver failed: {e}",
+            )
+
+        try:
+            artifact_path = write_artifact(
+                K=K,
+                dist=dist,
+                rms_px=float(rms),
+                image_size=image_size_wh,
+                n_views=len(self._samples),
+                board_spec=CHARUCO_BOARD,
+                camera_serial=self.camera_serial,
+                target_path=self.artifact_path,
+            )
+        except OSError as e:
+            return CalibResultMessage(
+                type="calib_result",
+                success=False,
+                n_views=len(self._samples),
+                error=f"solved but failed to write artifact: {e}",
+            )
+
+        logger.info(
+            "calibration solved: rms=%.3f n_views=%d -> %s",
+            rms,
+            len(self._samples),
+            artifact_path,
+        )
+
         return CalibResultMessage(
             type="calib_result",
-            success=False,
+            success=True,
             n_views=len(self._samples),
-            error="solve not implemented yet -- M0b-4 will wire calibrateCameraCharuco",
+            rms_px=float(rms),
+            K=np.asarray(K, dtype=float).tolist(),
+            dist=np.asarray(dist, dtype=float).flatten().tolist(),
+            artifact_path=str(artifact_path),
         )
 
     # ---- internals ---------------------------------------------------------
