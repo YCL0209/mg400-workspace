@@ -503,6 +503,37 @@ T8.5 motion path 用 `workbench demo_loop` 跑 stress demo 驗證 Phase 5 「真
 
 **段 1 結束訊號達成**。下一步：PR #28 ready → merge → 開段 2.1 `kinematics/transform.py`（finding 22 確認 client-side frame transform 必要、~3-4 小時離線）。
 
+### 26. **🐍 DmvSDK 綁 Python 主次版本、`.pyd` 載入失敗會偽裝成 circular import（2026-06-05 M0a Win setup）**
+
+M0a Win 端起手把 phase5-panel 的 `DmvSDK` 套件 `xcopy` 進 mg400 自己的 venv，`import DmvSDK` 卻炸：
+
+```
+ImportError: cannot import name '_DmvSDK' from partially initialized module 'DmvSDK'
+(most likely due to a circular import)
+```
+
+**「circular import」是誤導**。實際根因：`DmvSDK/__init__.py` → `from .DmvSDK import *` → `DmvSDK.py:40` → `from . import _DmvSDK`，`_DmvSDK` 是 C extension（`_DmvSDK.cp{38,39,310,311,312}-win_amd64.pyd`）。**沒有匹配當前 Python 版本的 `.pyd` 時** Python load 失敗、但用 `partially initialized module` 包裝成像 circular import。
+
+**版本檢查**：
+- mg400 venv 當時跑 **Python 3.14.4**（系統最新）
+- phase5-panel venv 跑 **Python 3.11.9**
+- DmvSDK 只支援 `cp38 / cp39 / cp310 / cp311 / cp312` → **3.14 沒對應 `.pyd`**
+
+**修法**：mg400 venv 砍掉重建用 3.11.9（跟 phase5-panel 完全一致）。`py -3.11 -m venv .venv` → `pip install -r requirements.txt` → 重新 `xcopy DmvSDK` → 通。
+
+**長期紀律**：
+- `requirements.txt` 加 Python 版本約束註解 → `# requires Python >=3.10,<3.13`，避免未來新 contributor 用最新 Python 建 venv 踩同條坑
+- mg400 ↔ phase5-panel 用同一 Python 版本（**3.11.9**），M0c 起手臂 + 相機混跑時兩邊套件可能互讀、版本對齊省事
+- 不放 DmvSDK 進 git（vendor、不 portable、4.5MB+ 二進位）；setup 文件記「Win 端 xcopy from phase5-panel」流程
+
+**對未來疑似 import bug 的 diagnostic 順序**：
+1. 看真實檔案路徑 → `print(some_module.__file__)`
+2. 對應 C extension 檔案存在嗎 → 列 `dir(some_module)`
+3. 對應 Python 版本嗎 → `python --version` vs `.pyd` 檔名的 `cp{XY}`
+4. 都對才考慮真的循環 import
+
+`partially initialized module` 訊息出現要先排 (1)–(3)，不要被字面的 "circular import" 誤導。
+
 ---
 
 ## FK 校驗資料(10 筆真實配對,法蘭中心,mm/deg)

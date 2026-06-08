@@ -1,4 +1,13 @@
 # Runtime dependencies for the MG400 platform.
+#
+# Python version: requires 3.10 <= python < 3.13. Reason: DmvSDK (Delta
+# industrial camera SDK; needed for M0 calibration and M2 inspection viz)
+# ships C extensions for cp38..cp312 only — newer Python has no matching
+# .pyd and import fails with a misleading "circular import" message
+# (PROGRESS.md finding 26). Mac/Linux dev without DmvSDK can use newer
+# Python freely, but Windows machines that talk to the camera must stay
+# in this range. 3.11.9 aligns with phase5-panel for easy package sharing.
+#
 # numpy parses the 1440-byte binary feedback frame (robot_core/transport/feedback.py).
 numpy>=1.24
 
