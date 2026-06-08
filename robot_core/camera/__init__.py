@@ -37,6 +37,12 @@ _DMV_SDK_MISSING_MSG = (
     "DMV installed and the DmvSDK module on PYTHONPATH. See docs/dmv_sdk.md."
 )
 
+# DcSystemUpdateInterfaceList / DcInterfaceUpdateDeviceList both take a
+# ``timeout`` int in milliseconds. Local USB / GigE enumeration usually
+# completes in <100ms; 1000 leaves headroom without freezing the UI on a
+# stuck device. Override per call only if a slow camera shows up.
+_ENUMERATION_TIMEOUT_MS = 1000
+
 
 class DeltaCamera:
     """Delta industrial camera wrapper around DmvSDK's 7-step acquisition flow.
@@ -94,7 +100,7 @@ class DeltaCamera:
 
         system = DmvSDK.DcSystemCreate()
         try:
-            DmvSDK.DcSystemUpdateInterfaceList(system)
+            DmvSDK.DcSystemUpdateInterfaceList(system, _ENUMERATION_TIMEOUT_MS)
             n_interfaces = DmvSDK.DcSystemGetInterfaceCount(system)
 
             devices: list[dict] = []
@@ -102,7 +108,7 @@ class DeltaCamera:
             for iface_idx in range(n_interfaces):
                 try:
                     interface = DmvSDK.DcSystemGetInterface(system, iface_idx)
-                    DmvSDK.DcInterfaceUpdateDeviceList(interface)
+                    DmvSDK.DcInterfaceUpdateDeviceList(interface, _ENUMERATION_TIMEOUT_MS)
                     n_devs = DmvSDK.DcInterfaceGetDeviceCount(interface)
                 except RuntimeError as e:
                     devices.append({
@@ -174,12 +180,12 @@ class DeltaCamera:
             return dev
 
         if self._requested_index is not None:
-            DmvSDK.DcSystemUpdateInterfaceList(self.system)
+            DmvSDK.DcSystemUpdateInterfaceList(self.system, _ENUMERATION_TIMEOUT_MS)
             n_ifaces = DmvSDK.DcSystemGetInterfaceCount(self.system)
             flat = 0
             for iface_idx in range(n_ifaces):
                 iface = DmvSDK.DcSystemGetInterface(self.system, iface_idx)
-                DmvSDK.DcInterfaceUpdateDeviceList(iface)
+                DmvSDK.DcInterfaceUpdateDeviceList(iface, _ENUMERATION_TIMEOUT_MS)
                 n_devs = DmvSDK.DcInterfaceGetDeviceCount(iface)
                 for dev_idx in range(n_devs):
                     if flat == self._requested_index:
@@ -195,11 +201,11 @@ class DeltaCamera:
         if dev is None:
             raise RuntimeError("No camera found — check power + cable")
         try:
-            DmvSDK.DcSystemUpdateInterfaceList(self.system)
+            DmvSDK.DcSystemUpdateInterfaceList(self.system, _ENUMERATION_TIMEOUT_MS)
             total = 0
             for iface_idx in range(DmvSDK.DcSystemGetInterfaceCount(self.system)):
                 iface = DmvSDK.DcSystemGetInterface(self.system, iface_idx)
-                DmvSDK.DcInterfaceUpdateDeviceList(iface)
+                DmvSDK.DcInterfaceUpdateDeviceList(iface, _ENUMERATION_TIMEOUT_MS)
                 total += DmvSDK.DcInterfaceGetDeviceCount(iface)
             if total > 1:
                 logger.warning(
