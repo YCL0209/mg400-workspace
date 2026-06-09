@@ -29,6 +29,7 @@ import asyncio
 import base64
 import dataclasses
 import logging
+import math
 import time
 from typing import Any, Optional
 
@@ -49,6 +50,7 @@ from pathlib import Path
 
 from robot_core.calibration.charuco import make_board
 
+from .handeye_artifact import write_artifact as write_handeye_artifact
 from .messages import (
     ArmStatePayload,
     BoardPose,
@@ -210,18 +212,260 @@ class HandeyeSession:
         return None
 
     def solve(self) -> HandeyeResultMessage:
-        """M0c-1 stub. M0c-3 will replace with cv2.calibrateHandEye(PARK).
+        """Solve T_tcp←cam via cv2.calibrateHandEye(PARK) and write artifact.
 
-        Returns a failure result so frontend wiring (success vs error path,
-        artifact path display, rms colouring) can be exercised end-to-end
-        in Mac smoke today without waiting on the real solver.
+        Pipeline (PHASE2 §8.2.1):
+
+        1. Filter samples with paired arm pose (offline captures dropped).
+        2. Require intrinsics loaded (K from M0b artifact -- without it,
+           we can't run PnP for the board-in-cam side).
+        3. Per sample: solvePnP via aruco.estimatePoseCharucoBoard ->
+           ``T_cam←board`` (board frame in camera, metres).
+        4. Per sample: build ``T_base←tcp`` from (x,y,z,r): Rz(r) +
+           t/1000. MG400 is 4-axis so roll/pitch ≡ 0 (parallel-linkage
+           keeps the tool vertical).
+        5. ``cv2.calibrateHandEye(R_gripper2base, t_gripper2base,
+           R_target2cam, t_target2cam, method=PARK)`` -> R_tcp_cam,
+           t_tcp_cam (metres).
+        6. Residual sanity: for each i, predict board origin in base
+           via ``T_base←tcp[i] @ T_tcp←cam @ T_cam←board[i]``. The
+           board IS stationary in base, so the spread of predictions is
+           our residual. We report the RMS distance to the mean in mm.
+        7. Write artifact, return success message.
+
+        Convention (OpenCV 4.x):
+        - ``R_gripper2base`` = gripper expressed in base = T_base←tcp's R
+        - ``R_target2cam``   = target expressed in cam  = T_cam←board's R
+        - returns ``R_cam2gripper, t_cam2gripper``      = T_gripper←cam
+                                                       = **T_tcp←cam** ✓
+
+        All NaN slots are intentionally omitted on failure paths
+        (finding 27 contract; tests assert json.dumps(..., allow_nan=False)).
         """
+        valid, dropped = self._select_valid_samples()
+        if len(valid) < 3:
+            return HandeyeResultMessage(
+                type="handeye_result",
+                success=False,
+                n_samples=len(valid),
+                n_samples_dropped=dropped,
+                error=(
+                    "need at least 3 samples with paired arm pose "
+                    f"(have {len(valid)}, dropped {dropped})"
+                ),
+            )
+        if self._K is None:
+            return HandeyeResultMessage(
+                type="handeye_result",
+                success=False,
+                n_samples=len(valid),
+                n_samples_dropped=dropped,
+                error="intrinsics not loaded -- run M0b first",
+            )
+
+        # Steps 3+4: build the four arrays cv2.calibrateHandEye expects.
+        R_gripper2base: list = []
+        t_gripper2base: list = []
+        R_target2cam: list = []
+        t_target2cam: list = []
+        T_base_tcp_cache: list = []  # for residual computation
+        T_cam_board_cache: list = []
+        pnp_dropped = 0
+        for s in valid:
+            T_base_tcp = self._pose_to_matrix(*s.arm_pose)  # 4x4, metres
+            try:
+                ok, rvec, tvec = aruco.estimatePoseCharucoBoard(
+                    s.corners, s.ids, self.board, self._K, self._dist, None, None
+                )
+            except cv2.error:
+                ok = False
+            if not ok:
+                pnp_dropped += 1
+                continue
+            R_cb, _ = cv2.Rodrigues(rvec)
+            t_cb = np.asarray(tvec, dtype=float).reshape(3)
+            T_cam_board = np.eye(4)
+            T_cam_board[:3, :3] = R_cb
+            T_cam_board[:3, 3] = t_cb
+
+            R_gripper2base.append(T_base_tcp[:3, :3])
+            t_gripper2base.append(T_base_tcp[:3, 3])
+            R_target2cam.append(R_cb)
+            t_target2cam.append(t_cb)
+            T_base_tcp_cache.append(T_base_tcp)
+            T_cam_board_cache.append(T_cam_board)
+
+        total_dropped = dropped + pnp_dropped
+        if len(R_gripper2base) < 3:
+            return HandeyeResultMessage(
+                type="handeye_result",
+                success=False,
+                n_samples=len(R_gripper2base),
+                n_samples_dropped=total_dropped,
+                error=(
+                    "PnP succeeded on too few samples "
+                    f"(have {len(R_gripper2base)}, dropped {total_dropped})"
+                ),
+            )
+
+        # Step 5: solve.
+        try:
+            R_tc, t_tc = cv2.calibrateHandEye(
+                R_gripper2base,
+                t_gripper2base,
+                R_target2cam,
+                t_target2cam,
+                method=cv2.CALIB_HAND_EYE_PARK,
+            )
+        except cv2.error as e:
+            return HandeyeResultMessage(
+                type="handeye_result",
+                success=False,
+                n_samples=len(R_gripper2base),
+                n_samples_dropped=total_dropped,
+                error=f"cv2.calibrateHandEye failed: {e}",
+            )
+
+        T_tcp_cam = np.eye(4)
+        T_tcp_cam[:3, :3] = R_tc
+        T_tcp_cam[:3, 3] = np.asarray(t_tc, dtype=float).reshape(3)
+
+        # Step 6: residual rms in mm.
+        rms_mm = self._compute_residual_mm(T_base_tcp_cache, T_tcp_cam, T_cam_board_cache)
+
+        # NaN/Inf guard at the boundary -- if calibrateHandEye somehow
+        # emits a degenerate matrix, fail loudly instead of writing a
+        # broken artifact (finding 27).
+        if not math.isfinite(rms_mm) or not np.all(np.isfinite(T_tcp_cam)):
+            return HandeyeResultMessage(
+                type="handeye_result",
+                success=False,
+                n_samples=len(R_gripper2base),
+                n_samples_dropped=total_dropped,
+                error="solver returned non-finite values -- check sample diversity",
+            )
+
+        # Step 7: write artifact (translation back to mm).
+        t_mm = T_tcp_cam[:3, 3] * 1000.0
+        intrinsics_rms_px, intrinsics_file = self._intrinsics_metadata()
+        try:
+            artifact_path = write_handeye_artifact(
+                R=T_tcp_cam[:3, :3],
+                t_mm=t_mm,
+                rms_residual_mm=rms_mm,
+                n_samples=len(R_gripper2base),
+                method="CALIB_HAND_EYE_PARK",
+                intrinsics_file=intrinsics_file,
+                intrinsics_rms_px=intrinsics_rms_px,
+                camera_serial=self.camera_serial,
+                target_path=self.artifact_path,
+            )
+        except (OSError, ValueError) as e:
+            return HandeyeResultMessage(
+                type="handeye_result",
+                success=False,
+                n_samples=len(R_gripper2base),
+                n_samples_dropped=total_dropped,
+                error=f"solved but failed to write artifact: {e}",
+            )
+
+        logger.info(
+            "handeye solved: rms_residual=%.3fmm n_samples=%d (dropped %d) -> %s",
+            rms_mm,
+            len(R_gripper2base),
+            total_dropped,
+            artifact_path,
+        )
+
         return HandeyeResultMessage(
             type="handeye_result",
-            success=False,
-            n_samples=len(self._samples),
-            error="solver pending M0c-3",
+            success=True,
+            n_samples=len(R_gripper2base),
+            n_samples_dropped=total_dropped,
+            method="CALIB_HAND_EYE_PARK",
+            rms_residual_mm=float(rms_mm),
+            R=T_tcp_cam[:3, :3].tolist(),
+            t=t_mm.tolist(),
+            artifact_path=str(artifact_path),
         )
+
+    # ---- solver helpers ----------------------------------------------------
+
+    def _select_valid_samples(self) -> tuple[list, int]:
+        """Partition the buffer: samples with arm pose, dropped count."""
+        valid = [s for s in self._samples if s.arm_pose is not None]
+        dropped = len(self._samples) - len(valid)
+        return valid, dropped
+
+    @staticmethod
+    def _pose_to_matrix(
+        x_mm: float, y_mm: float, z_mm: float, r_deg: float
+    ) -> np.ndarray:
+        """Convert MG400 4-axis TCP pose ``(x,y,z,r)`` to ``T_base←tcp`` in metres.
+
+        MG400 is parallel-linkage: roll/pitch ≡ 0, only yaw r varies (per
+        finding 1 / B6 audit, ``r = tool_vector_actual[3] = J1 + J4``).
+        So the rotation is a pure Rz(r); translation is (x,y,z) in mm
+        converted to metres to match cv2's internal scale (the board's
+        square_size_mm is converted to metres in make_board, so all cv2
+        translations are metres -- t_gripper2base must match).
+        """
+        r_rad = math.radians(r_deg)
+        c, s = math.cos(r_rad), math.sin(r_rad)
+        T = np.eye(4)
+        T[:3, :3] = np.array(
+            [
+                [c, -s, 0.0],
+                [s, c, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        T[:3, 3] = np.array([x_mm, y_mm, z_mm]) / 1000.0
+        return T
+
+    @staticmethod
+    def _compute_residual_mm(
+        T_base_tcp_list: list, T_tcp_cam: np.ndarray, T_cam_board_list: list
+    ) -> float:
+        """RMS spread of predicted board-origin-in-base across samples (mm).
+
+        The board doesn't move in base frame, so every
+        ``T_base←board[i] = T_base←tcp[i] @ T_tcp←cam @ T_cam←board[i]``
+        SHOULD give the same point. The spread (about the mean) is our
+        residual signal. Returned in mm (cv2 lives in metres internally).
+        """
+        predicted = []
+        for T_bt, T_cb in zip(T_base_tcp_list, T_cam_board_list):
+            T_bb = T_bt @ T_tcp_cam @ T_cb
+            predicted.append(T_bb[:3, 3])  # metres
+        P = np.asarray(predicted, dtype=float)
+        mean = P.mean(axis=0)
+        deltas = np.linalg.norm(P - mean, axis=1)  # metres per sample
+        rms_m = float(np.sqrt(np.mean(deltas ** 2)))
+        return rms_m * 1000.0  # mm
+
+    def _intrinsics_metadata(self) -> tuple[Optional[float], str]:
+        """Return ``(intrinsics_rms_px, intrinsics_file)`` for the artifact.
+
+        We try to read the intrinsics rms from the same JSON the
+        constructor loaded K + dist from -- this lets operators trace
+        WHICH camera_intrinsics.json a given hand_eye.json was solved
+        against. If the file's gone or doesn't have rms_px, we still
+        record the path (downstream can decide what to do).
+        """
+        path = _DEFAULT_INTRINSICS_PATH
+        # Use the explicit file path the session was constructed with,
+        # not the global default, if the caller passed one. We don't
+        # currently thread that through (intrinsics_path defaults to
+        # _DEFAULT_INTRINSICS_PATH inside _try_load_intrinsics), so the
+        # production path is the default file.
+        rel_path = str(path.relative_to(path.parent.parent)) if path.is_absolute() else str(path)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            return float(data.get("rms_px", 0.0)) or None, rel_path
+        except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError):
+            return None, rel_path
 
     # ---- internals ---------------------------------------------------------
 

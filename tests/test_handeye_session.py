@@ -192,32 +192,30 @@ class TestHandeyeSession(unittest.TestCase):
         self.session.apply_action({"action": "reset"})
         self.assertEqual(self.session.collected, 0)
 
-    def test_solve_is_stub_returning_pending_error(self):
-        """M0c-1 stub contract: solve always fails with M0c-3 pending message."""
+    def test_solve_fails_when_no_samples_with_arm_pose(self):
+        """All offline captures -> 0 valid samples -> need-at-least-3 error."""
         self._run(self.session.stream_frame())
+        # Capture a few times but arm is offline -> all sample.arm_pose=None.
         for _ in range(5):
             self.session.apply_action({"action": "capture"})
 
         result = self.session.apply_action({"action": "solve"})
-        self.assertIsNotNone(result)
         self.assertEqual(result["type"], "handeye_result")
         self.assertFalse(result["success"])
-        self.assertEqual(result["n_samples"], 5)
-        self.assertIn("M0c-3", result["error"])
-        # NaN-omission contract: no numeric rms field on failure.
+        self.assertEqual(result["n_samples"], 0)
+        self.assertEqual(result["n_samples_dropped"], 5)
+        self.assertIn("at least 3", result["error"])
+        # NaN-omission contract: failure paths must not carry numeric rms.
         self.assertNotIn("rms_residual_mm", result)
-        # And no artifact landed on disk (stub mustn't pretend it solved).
         self.assertFalse(self.session.artifact_path.exists())
 
-    def test_solve_result_is_json_clean(self):
-        """Wire schema must serialise cleanly -- no NaN, no numpy types."""
+    def test_solve_failure_result_is_json_clean(self):
+        """Failure-path schema must serialise without NaN (finding 27)."""
         result = self.session.apply_action({"action": "solve"})
-        # json.dumps with default settings rejects NaN/Inf if allow_nan=False.
-        # We pass allow_nan=False to assert we never sneak in a NaN.
         try:
             json.dumps(result, allow_nan=False)
         except ValueError as e:
-            self.fail(f"handeye_result not JSON-clean: {e}")
+            self.fail(f"handeye_result not JSON-clean on failure: {e}")
 
     def test_unknown_action_is_logged_and_ignored(self):
         self.assertIsNone(self.session.apply_action({"action": "nuke"}))
@@ -304,6 +302,335 @@ class TestHandeyeSessionWithArm(unittest.TestCase):
             json.dumps(msg, allow_nan=False)
         except (ValueError, TypeError) as e:
             self.fail(f"handeye_frame not JSON-clean with arm online: {e}")
+
+
+@unittest.skipUnless(HAS_CV2, "opencv-contrib-python not installed")
+class TestPoseToMatrix(unittest.TestCase):
+    """Direct tests for the (x,y,z,r) -> T_base<-tcp helper.
+
+    Convention is load-bearing for the whole solver: if r maps to the
+    wrong axis or the units are wrong, every downstream sample is
+    miscomputed. Pin it explicitly.
+    """
+
+    def _M(self, x, y, z, r):
+        from viz.handeye_session import HandeyeSession
+
+        return HandeyeSession._pose_to_matrix(x, y, z, r)
+
+    def test_zero_pose_is_identity_with_zero_translation(self):
+        T = self._M(0, 0, 0, 0)
+        np.testing.assert_allclose(T, np.eye(4), atol=1e-12)
+
+    def test_translation_is_in_metres(self):
+        """1000mm input -> 1.0 metre in T. Matches cv2's metre convention."""
+        T = self._M(1000.0, 2000.0, -500.0, 0)
+        np.testing.assert_allclose(T[:3, 3], [1.0, 2.0, -0.5], atol=1e-12)
+
+    def test_r_is_yaw_about_z(self):
+        """r=90deg -> +x in TCP becomes +y in base (right-hand Rz)."""
+        T = self._M(0, 0, 0, 90)
+        x_in_tcp = np.array([1.0, 0.0, 0.0, 1.0])
+        # T @ x_tcp = x_base
+        x_in_base = T @ x_in_tcp
+        np.testing.assert_allclose(x_in_base[:3], [0.0, 1.0, 0.0], atol=1e-12)
+
+    def test_negative_yaw_is_consistent(self):
+        T_pos = self._M(0, 0, 0, 45)
+        T_neg = self._M(0, 0, 0, -45)
+        # Rz(45) @ Rz(-45) == identity
+        np.testing.assert_allclose(T_pos @ T_neg, np.eye(4), atol=1e-12)
+
+
+@unittest.skipUnless(HAS_CV2, "opencv-contrib-python not installed")
+class TestHandeyeSolverFailurePaths(unittest.TestCase):
+    """Solver should fail loudly + cleanly when prereqs aren't met."""
+
+    def setUp(self):
+        import cv2
+
+        from robot_core.calibration.charuco import make_board
+        from viz.handeye_session import HandeyeSession
+
+        self.board = make_board()
+        board_img = self.board.generateImage((800, 1100))
+        self.synthetic_rgb = cv2.cvtColor(board_img, cv2.COLOR_GRAY2RGB)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.session = HandeyeSession(
+            camera=_FakeCamera(frames_to_yield=[self.synthetic_rgb] * 50),
+            arm_state=_FakeArmState(snapshot=_FakeArmSnapshot()),
+            board=self.board,
+            target_views=5,
+            # Intrinsics injected so PnP step CAN run -- failure tests
+            # below selectively unset this to drive the "no K" path.
+            intrinsics_K=np.array(
+                [[800.0, 0.0, 400.0], [0.0, 800.0, 550.0], [0.0, 0.0, 1.0]]
+            ),
+            intrinsics_dist=np.zeros(5),
+            artifact_path=Path(self._tmp.name) / "hand_eye.json",
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_fewer_than_three_paired_samples_fails(self):
+        self._run(self.session.stream_frame())
+        self.session.apply_action({"action": "capture"})
+        self.session.apply_action({"action": "capture"})  # only 2 paired
+        result = self.session.apply_action({"action": "solve"})
+        self.assertFalse(result["success"])
+        self.assertEqual(result["n_samples"], 2)
+        self.assertIn("at least 3", result["error"])
+        self.assertNotIn("rms_residual_mm", result)
+        self.assertFalse(self.session.artifact_path.exists())
+
+    def test_intrinsics_missing_fails(self):
+        # Strip K to drive the "no K" path; need 3+ paired samples first
+        # so we don't trip the earlier guard.
+        self._run(self.session.stream_frame())
+        for _ in range(3):
+            self.session.apply_action({"action": "capture"})
+        self.session._K = None
+        result = self.session.apply_action({"action": "solve"})
+        self.assertFalse(result["success"])
+        self.assertIn("intrinsics not loaded", result["error"])
+        self.assertNotIn("rms_residual_mm", result)
+        self.assertFalse(self.session.artifact_path.exists())
+
+
+@unittest.skipUnless(HAS_CV2, "opencv-contrib-python not installed")
+class TestHandeyeSolverSyntheticRoundTrip(unittest.TestCase):
+    """End-to-end correctness pin: known T_tcp<-cam should be recovered.
+
+    Strategy:
+    1. Pick a known T_tcp_cam (rotation + translation in metres).
+    2. Generate N varied T_base_tcp poses.
+    3. Pick an arbitrary T_base_board ("the board sits here in base").
+    4. For each i, compute T_cam_board = inv(T_tcp_cam) @ inv(T_base_tcp_i)
+       @ T_base_board. This is the PnP result the real cam WOULD have
+       observed if the geometry was exact.
+    5. Build HandeyeSamples whose arm_pose encodes T_base_tcp and whose
+       (corners, ids) trigger a mocked estimatePoseCharucoBoard returning
+       the right (rvec, tvec).
+    6. Run solve() with a mocked cv2.calibrateHandEye -- skip the
+       mocking for cv2.calibrateHandEye itself; the real implementation
+       should recover T_tcp_cam from this clean data.
+    7. Verify recovered R/t close to the known one + artifact written.
+
+    This is the test that catches axis-convention errors (Rz direction,
+    metre/mm swaps, gripper2base vs base2gripper mixups) BEFORE we hit
+    hardware in M0c-2.
+    """
+
+    def setUp(self):
+        import cv2
+
+        from robot_core.calibration.charuco import make_board
+        from viz.handeye_session import HandeyeSample, HandeyeSession
+
+        self.cv2 = cv2
+        self.board = make_board()
+        board_img = self.board.generateImage((800, 1100))
+        self.synthetic_rgb = cv2.cvtColor(board_img, cv2.COLOR_GRAY2RGB)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.session = HandeyeSession(
+            camera=_FakeCamera(frames_to_yield=[self.synthetic_rgb] * 5),
+            board=self.board,
+            target_views=10,
+            intrinsics_K=np.array(
+                [[800.0, 0.0, 400.0], [0.0, 800.0, 550.0], [0.0, 0.0, 1.0]]
+            ),
+            intrinsics_dist=np.zeros(5),
+            artifact_path=Path(self._tmp.name) / "hand_eye.json",
+        )
+        self._HandeyeSample = HandeyeSample
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _rz(deg):
+        r = math.radians(deg)
+        c, s = math.cos(r), math.sin(r)
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=float)
+
+    @staticmethod
+    def _T(R, t):
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = t
+        return T
+
+    @staticmethod
+    def _rx(deg):
+        r = math.radians(deg)
+        c, s = math.cos(r), math.sin(r)
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=float)
+
+    @staticmethod
+    def _ry(deg):
+        r = math.radians(deg)
+        c, s = math.cos(r), math.sin(r)
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=float)
+
+    def _diverse_gripper_poses(self):
+        """Yield (R_base_tcp, t_base_tcp_m) pairs with rotation-axis diversity.
+
+        Real MG400 is yaw-only (degenerate for hand-eye rotation
+        recovery). To validate algorithm WIRING -- units, gripper2base
+        vs base2gripper convention, residual computation -- we bypass
+        _pose_to_matrix in this test and feed diverse rotations.
+
+        M0c-2 real-arm validation will face the genuine MG400 degeneracy
+        (translation recoverable, rotation partial); the algorithm
+        correctness shown here is a prerequisite for interpreting those
+        results.
+        """
+        return [
+            (self._rz(0), np.array([0.20, 0.00, 0.10])),
+            (self._rz(30) @ self._rx(15), np.array([0.20, 0.05, 0.10])),
+            (self._rz(-30) @ self._ry(15), np.array([0.25, -0.05, 0.10])),
+            (self._rx(45), np.array([0.18, 0.08, 0.12])),
+            (self._ry(-30) @ self._rz(20), np.array([0.22, -0.03, 0.08])),
+            (self._rx(-15) @ self._rz(45), np.array([0.26, 0.02, 0.11])),
+        ]
+
+    def _build_samples_and_pnp_returns(self, T_tcp_cam_known, T_base_board, poses):
+        """Generate (samples, [(rvec, tvec)]) for a given known geometry."""
+        T_tcp_cam_inv = np.linalg.inv(T_tcp_cam_known)
+        rvecs_tvecs = []
+        T_base_tcps = []
+        samples = []
+        for (R_bt, t_bt) in poses:
+            T_base_tcp = self._T(R_bt, t_bt)
+            T_cam_board = T_tcp_cam_inv @ np.linalg.inv(T_base_tcp) @ T_base_board
+            rvec, _ = self.cv2.Rodrigues(T_cam_board[:3, :3])
+            tvec = T_cam_board[:3, 3].reshape(3, 1)
+            rvecs_tvecs.append((rvec, tvec))
+            T_base_tcps.append(T_base_tcp)
+            samples.append(
+                self._HandeyeSample(
+                    corners=np.zeros((4, 1, 2), dtype=np.float32),
+                    ids=np.zeros((4, 1), dtype=np.int32),
+                    image_size=(1080, 1440),
+                    # arm_pose is irrelevant once _pose_to_matrix is patched
+                    # to return T_base_tcps[i] directly; we still set non-None
+                    # so _select_valid_samples keeps the sample.
+                    arm_pose=(0.0, 0.0, 0.0, 0.0),
+                    arm_joints=(0.0, 0.0, 0.0, 0.0),
+                    captured_at_monotonic=0.0,
+                )
+            )
+        return samples, rvecs_tvecs, T_base_tcps
+
+    def test_synthetic_round_trip_recovers_known_T_tcp_cam(self):
+        from unittest.mock import patch
+
+        # Known answer: camera mounted with a 90deg pitch + 50mm offset.
+        # Realistic eye-in-hand mounting points camera Z forward; we pick
+        # this to break the Rz-only degeneracy in the synthetic data.
+        R_known = self._rx(90) @ self._rz(30)
+        t_known_m = np.array([0.05, -0.02, 0.10])
+        T_tcp_cam_known = self._T(R_known, t_known_m)
+        T_base_board = self._T(np.eye(3), np.array([0.30, 0.10, 0.0]))
+
+        poses = self._diverse_gripper_poses()
+        samples, rvecs_tvecs, T_base_tcps = self._build_samples_and_pnp_returns(
+            T_tcp_cam_known, T_base_board, poses
+        )
+        self.session._samples = samples
+
+        call_idx = {"i": 0}
+
+        def fake_estimate(*args, **kwargs):
+            i = call_idx["i"]
+            call_idx["i"] += 1
+            rvec, tvec = rvecs_tvecs[i]
+            return True, rvec, tvec
+
+        # Patch _pose_to_matrix to return our diverse-axis T_base_tcps in
+        # order. arm_pose tuples are irrelevant; we just need the sample
+        # iteration to map index -> our matrix.
+        seq = {"i": 0}
+
+        def fake_pose_to_matrix(x, y, z, r):
+            T = T_base_tcps[seq["i"]]
+            seq["i"] += 1
+            return T
+
+        with patch(
+            "viz.handeye_session.aruco.estimatePoseCharucoBoard",
+            side_effect=fake_estimate,
+        ), patch.object(
+            type(self.session), "_pose_to_matrix", staticmethod(fake_pose_to_matrix)
+        ):
+            result = self.session.apply_action({"action": "solve"})
+
+        self.assertTrue(
+            result["success"], f"solve failed: {result.get('error', '?')}"
+        )
+        self.assertEqual(result["n_samples"], 6)
+        self.assertEqual(result["n_samples_dropped"], 0)
+        self.assertEqual(result["method"], "CALIB_HAND_EYE_PARK")
+
+        R_recovered = np.asarray(result["R"])
+        t_recovered_mm = np.asarray(result["t"])
+        # Clean data + diverse axes -> sub-micrometre recovery.
+        np.testing.assert_allclose(R_recovered, R_known, atol=1e-6)
+        np.testing.assert_allclose(t_recovered_mm, t_known_m * 1000.0, atol=1e-3)
+        self.assertLess(result["rms_residual_mm"], 1e-3)
+        self.assertTrue(self.session.artifact_path.exists())
+
+    def test_success_result_is_json_clean(self):
+        """Reuse synthetic round-trip and assert JSON output never has NaN."""
+        from unittest.mock import patch
+
+        R_known = self._rx(90)
+        t_known_m = np.array([0.0, 0.0, 0.05])
+        T_tcp_cam_known = self._T(R_known, t_known_m)
+        T_base_board = self._T(np.eye(3), np.array([0.25, 0.0, 0.0]))
+
+        poses = self._diverse_gripper_poses()[:4]
+        samples, rvecs_tvecs, T_base_tcps = self._build_samples_and_pnp_returns(
+            T_tcp_cam_known, T_base_board, poses
+        )
+        self.session._samples = samples
+
+        call_idx = {"i": 0}
+
+        def fake_estimate(*args, **kwargs):
+            i = call_idx["i"]
+            call_idx["i"] += 1
+            rvec, tvec = rvecs_tvecs[i]
+            return True, rvec, tvec
+
+        seq = {"i": 0}
+
+        def fake_pose_to_matrix(x, y, z, r):
+            T = T_base_tcps[seq["i"]]
+            seq["i"] += 1
+            return T
+
+        with patch(
+            "viz.handeye_session.aruco.estimatePoseCharucoBoard",
+            side_effect=fake_estimate,
+        ), patch.object(
+            type(self.session), "_pose_to_matrix", staticmethod(fake_pose_to_matrix)
+        ):
+            result = self.session.apply_action({"action": "solve"})
+
+        self.assertTrue(result["success"])
+        try:
+            json.dumps(result, allow_nan=False)
+        except (ValueError, TypeError) as e:
+            self.fail(f"handeye_result not JSON-clean on success: {e}")
 
 
 if __name__ == "__main__":

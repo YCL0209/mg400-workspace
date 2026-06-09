@@ -95,8 +95,8 @@ class TestWsHandeyeEndpoint(unittest.TestCase):
                 seen_capture, "capture action did not advance collected counter"
             )
 
-    def test_solve_action_returns_pending_failure(self):
-        """M0c-1 stub: solve always fails with M0c-3 pending error."""
+    def test_solve_action_with_no_samples_returns_failure(self):
+        """Solve without any captured samples: at-least-3 failure."""
         with self.client.websocket_connect("/ws/handeye") as ws:
             ws.receive_json()
             ws.send_text('{"action": "solve"}')
@@ -106,7 +106,8 @@ class TestWsHandeyeEndpoint(unittest.TestCase):
                     break
             self.assertEqual(msg["type"], "handeye_result")
             self.assertFalse(msg["success"])
-            self.assertIn("M0c-3", msg["error"])
+            self.assertIn("at least 3", msg["error"])
+            self.assertEqual(msg["n_samples"], 0)
 
 
 if __name__ == "__main__":

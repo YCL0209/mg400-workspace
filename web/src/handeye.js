@@ -126,6 +126,8 @@ function renderArm(arm) {
 }
 
 export function applyHandeyeResult(msg) {
+  const dropped = msg.n_samples_dropped ?? 0;
+  const dropTag = dropped > 0 ? ` (dropped ${dropped})` : "";
   if (msg.success) {
     const rms = (msg.rms_residual_mm ?? NaN).toFixed(3);
     residualStatEl.textContent = `${rms} mm`;
@@ -134,7 +136,7 @@ export function applyHandeyeResult(msg) {
     artifactStatEl.textContent = msg.artifact_path || "—";
     artifactStatEl.className = "stat-value ok";
     logLine(
-      `solve OK: residual=${rms} mm n_samples=${msg.n_samples} -> ${msg.artifact_path}`,
+      `solve OK: residual=${rms} mm n_samples=${msg.n_samples}${dropTag} -> ${msg.artifact_path}`,
       "ok",
     );
   } else {
@@ -142,7 +144,7 @@ export function applyHandeyeResult(msg) {
     residualStatEl.className = "stat-value bad";
     artifactStatEl.textContent = "—";
     artifactStatEl.className = "stat-value";
-    logLine(`solve failed: ${msg.error}`, "err");
+    logLine(`solve failed${dropTag}: ${msg.error}`, "err");
   }
 }
 
