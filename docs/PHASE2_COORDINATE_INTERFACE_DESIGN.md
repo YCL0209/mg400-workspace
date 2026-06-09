@@ -169,7 +169,7 @@ JSON,單位 mm / 度,位姿一律 `{x,y,z,r}`(概念⑦)。
 |---|---|---|---|
 | **M0a** | DeltaCamera adapter + multi-camera 選擇 + smoke | `robot_core/camera/`、`scripts/{list_,}camera_smoke.py`、camera_serial 進 config | ✅ merged `5a2eb9d` |
 | **M0b** | 相機內參標定(瀏覽器式 live capture + ChArUco) | `config/camera_intrinsics.json`、`viz/calib_*`、ChArUco 板列印腳本 | ⏳ planned (§8.1) |
-| **M0c** | 手眼校正(eye-in-hand,跟手臂同 session) | `config/hand_eye.json`、`scripts/handeye_calib.py` | 🔒 等 M0b |
+| **M0c** | 手眼校正(eye-in-hand,跟手臂同 session) | `config/hand_eye.json`、`viz/handeye_*` + `web/handeye.html` | ⏳ planned (§8.2) |
 | **M0d** | sanity verify(已知物投影 vs 實放) | `scripts/handeye_verify.py` | 🔒 等 M0c |
 | **M1** | ws 後端骨架 + 前端畫「靜態工作範圍 + 座標格」(不接相機) | `viz/` 後端 + 前端;推 `workspace` 訊息 | ✅ merged `6241111` |
 | **M2** | 接 30004 即時位姿 + 算/畫 FOV 框 | 推 `state`(pose/joints/fov_polygon) | 🔒 等 M0d artifact |
@@ -303,6 +303,235 @@ solver、artifact JSON 寫的 board metadata 全部從這拿。
 - ChArUco 板在畫面中**佔比 > 30%**(太小角點偵測不穩)
 - 每張 corners_found ≥ 30(≥ 50% 總數)
 - 完成後一張畫面看 RMS + 重投影誤差分布,大於 1.0 就重來
+
+---
+
+## 8.2 M0c 細節:eye-in-hand 手眼校正
+
+**目標**:在 ≥15 個手臂 pose 下,各拍一張 ChArUco 板、同時記錄當下 TCP 位姿,解出
+**`T_tcp←cam`**(相機相對 TCP 的剛性外參 4×4 同質變換),寫進 `config/hand_eye.json`。
+M2 FOV 反投影、M3 AOI 結果換算 base 座標,都吃這個 artifact。
+
+**為什麼接著 §8.1 走 viz/web**:M0b 把 viz/ 升級為「相機 stream + ChArUco overlay + sample
+buffer + solve」一條龍。M0c **直接擴充 calib.html 加 hand-eye mode**,沿用同一條 ws 管道、同一份
+ChArUco detector、同一個 SPACE/ESC/R 鍵盤 binding,只多一條「同步抓 30004 TCP pose」的支線。
+操作員的肌肉記憶從 M0b 帶下來。
+
+**前置(M0c 開工前必須就位)**:
+1. `config/camera_intrinsics.json` 已寫(M0b-4 完成,rms_px < 1.0)
+2. 手臂 enable 且 workbench 三條 connected log 都看到(finding 17)
+3. 鏡頭環鎖住,**不曾被碰過**(M0b 之後鏡頭一動 K 就失效)
+4. ChArUco 板**剛性固定不動**(本設計選桌面平放,見 §8.2.6)
+
+### 8.2.1 演算法
+
+**核心呼叫**:
+```python
+R_tcp_cam, t_tcp_cam = cv2.calibrateHandEye(
+    R_gripper2base=[...],   # 每個 pose 的 R_base←tcp (從 FK / 30004 pose 算)
+    t_gripper2base=[...],   # 每個 pose 的 t_base←tcp
+    R_target2cam=[...],     # 每個 pose 的 R_cam←board (從 estimatePoseCharucoBoard)
+    t_target2cam=[...],     # 每個 pose 的 t_cam←board
+    method=cv2.CALIB_HAND_EYE_PARK,
+)
+```
+
+**每次採點兩條資料同時抓**:
+- **(a) 手臂 pose**:`FeedbackFrame.pose` (30004,4 軸 TCP `{x,y,z,r}`) → 轉成 4×4 同質變換
+  `T_base←tcp`(z 軸 yaw = r,roll/pitch = 0,因 4 軸末端恆鉛直)
+- **(b) 板對相機 pose**:`cv2.aruco.estimatePoseCharucoBoard(charuco_corners, charuco_ids,
+  board, K, dist, None, None)` → rvec/tvec → `T_cam←board`
+
+`method=PARK` 為預設(SDK 認同;TSAI 為備援若 PARK 解品質差時試)。
+
+**Residual sanity check**(solve 後跑):
+對每個樣本 i: `T_base←board_pred = T_base←tcp[i] · T_tcp←cam · T_cam←board[i]`。
+理論上 `T_base←board_pred` 對所有 i 應該重合(板在 base 系下不動)。
+取所有 i 的 `t_base←board_pred` 平均當「真值」、算每樣本到平均的距離 → rms = `rms_residual_mm`。
+**< 2mm = OK**;> 5mm = 採點品質差(姿態散布不夠、板搖動、TCP feedback 跟 PnP 不同步)→ 重採。
+
+### 8.2.2 MG400 4 軸採點難點
+
+MG400 只有 J1+J4 的 yaw 自由度 r,**roll/pitch 永遠是 0**——`cv2.calibrateHandEye` 數學上要求
+gripper 姿態變化有足夠 rank,否則解奇異。實務需要在以下三個維度散開,才能解出穩定的
+`T_tcp←cam`:
+
+| 維度 | 採樣要求 | 為什麼 |
+|---|---|---|
+| **XY base 位置** | 至少 9 個 XY 區塊(類似 3×3 棋盤)各 1 點 | 不同 xy 看到的板透視不同,給 t 提供解 |
+| **r (J1+J4) 變化** | 至少 3 種 r 組合(e.g. r = -60° / 0° / +60°) | 解 R 必需的姿態變化,沒有就會奇異 |
+| **J1/J4 各自分散** | 不要全部用同一個 J1 + 變 J4 來湊 r | 4 軸 r = J1+J4 各種拆法物理姿態不同,加 redundancy |
+
+**鏡頭朝向假設**(依實際治具修正本節):相機 mount 在手臂法蘭面、鏡頭**朝向 法蘭 +Y(從上看是手臂前方右側)
+或 +X(直前方)**。採點時要保證 **相機畫面框得到整塊板**——工作距離 30cm(M0b 鎖鏡頭時設定),
+所以每個 pose 的 (x,y,z) 都要讓相機光軸落在板上、距離板 30cm 左右。
+
+**z 安全**:目前 `config/safety.json` `z_max=116mm`(保守,finding 28 待寫:實機可到 195mm)。
+桌面平放方案會把板「墊高至 ~30cm 工作距離」,z=116mm 對 30cm 工作距離夠用(板墊高就好)。
+
+### 8.2.3 ws 訊息 schema 擴充
+
+`/ws/handeye` endpoint(獨立於 `/ws/calib` 但共享 viz server),沿 §8.1.2 pattern:
+
+**(f) Live handeye frame 推送**(類似 `calib_frame`、多 arm 段)
+
+```json
+{
+  "type": "handeye_frame",
+  "jpeg_b64": "/9j/4AAQ...",
+  "timestamp_ms": 12345,
+  "detection": {
+    "charuco_corners_found": 38,
+    "charuco_corners_total": 54,
+    "board_visible": true,
+    "board_pose": {"tx_mm": 12.3, "ty_mm": -4.5, "tz_mm": 312.7}
+  },
+  "arm": {
+    "available": true,
+    "pose": {"x": 230.0, "y": 0.0, "z": 60.0, "r": -45.0},
+    "joints": [-0.01, 5.21, 32.40, -44.99],
+    "mode": 5,
+    "enabled": true,
+    "has_error": false
+  },
+  "captures": {"collected": 8, "target": 15}
+}
+```
+
+`arm.available=false` 時 backend 沒接上 30004(可能手臂沒開、或 transport 還沒連),前端顯示
+「ARM: OFFLINE」、disable SPACE。`mode != 5`(running / error / disabled)時顯示警告但不擋
+SPACE——操作員的責任。
+
+**(g) Client → backend action**(同 calib action 名稱,獨立 buffer)
+
+```json
+{"action": "capture" | "discard" | "reset" | "solve"}
+```
+
+`capture` 時 backend 同時 snap 當前 jpeg-decoded frame + 抓 `RobotState.snapshot()` 配對成
+一筆 `HandeyeSample`。若 `arm.available=false`,server 回 `handeye_error`(不入 buffer)。
+
+**(h) Solve 結果**
+
+```json
+{
+  "type": "handeye_result",
+  "success": true,
+  "n_samples": 18,
+  "method": "CALIB_HAND_EYE_PARK",
+  "rms_residual_mm": 1.42,
+  "R": [[r11,r12,r13],[r21,r22,r23],[r31,r32,r33]],
+  "t": [tx, ty, tz],
+  "artifact_path": "config/hand_eye.json"
+}
+```
+
+`success=false` 時帶 `error` 欄位(樣本不足、PARK 解奇異、rms 過大等);**不寫 artifact**。
+跟 M0b-4 同坑:`rms_residual_mm` 缺值時整欄省略,不要送 `NaN`(JSON.parse 會炸,finding 27 教訓)。
+
+### 8.2.4 4 sub-PR 拆分
+
+每個獨立可 merge、各自驗收。仿 M0b 切法:
+
+| sub-PR | 內容 | 環境 |
+|---|---|---|
+| **M0c-0** | §8.2 設計 doc(本 PR) | 純離線(Mac OK) |
+| **M0c-1** | viz/ backend:`viz/handeye_session.py`(沿 `CalibSession` pattern,加 arm pose 抓取 hook 但**先 mock 接口**,arm 訊息回 `available=false`)、`viz/server.py` 加 `/ws/handeye`、`viz/messages.py` 加 handeye_* 型別;web/:`web/handeye.html` + `web/src/handeye.js`(沿 `calib.js` 但加 arm 狀態欄)| Mac 離線可寫測完(無 cv2 環境降級) |
+| **M0c-2** | arm pose 接線:`HandeyeSession` 加 `arm_state: RobotStateMonitor` 參數,從 `RobotState.snapshot()` 抓 pose+joints+mode→ `arm.available=true`;`viz/server.py` 啟動時建立 transport + AsyncFeedbackStream + RobotState(沿 §7 重用清單)| Win(實機手臂 + 相機) |
+| **M0c-3** | solver + artifact:`HandeyeSession.solve()` 跑 `cv2.calibrateHandEye(PARK)` + residual sanity → `viz/handeye_artifact.py` 寫 `config/hand_eye.json`、tests 完整 | Win(實機跑 15+ 採點) |
+
+**M0c-1 / M0c-2 的切割理由**:Mac 端沒手臂,但有 cv2 + 板,M0c-1 把採點 UI 寫完(arm 段先 stub)
+可離線跑 unit tests + Mac 上預演前端、減低 Win 端 debug 時間。M0c-2 在 Win 端接上 arm,只動
+backend 接線。
+
+### 8.2.5 `config/hand_eye.json` schema
+
+```json
+{
+  "T_tcp_cam": {
+    "R": [[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]],
+    "t": [tx_mm, ty_mm, tz_mm]
+  },
+  "frame": "tcp",
+  "method": "CALIB_HAND_EYE_PARK",
+  "n_samples": 18,
+  "rms_residual_mm": 1.42,
+  "intrinsics_file": "config/camera_intrinsics.json",
+  "intrinsics_rms_px": 0.894,
+  "camera_serial": "C1M6GM0W24460005",
+  "captured_at": "2026-06-10T22:15:00",
+  "tool_version": "M0c-v1"
+}
+```
+
+**設計選擇**:
+- `frame: "tcp"`(對齊 30004 `.pose`,免跑 FK)——若未來改 flange,改這欄位 + 採點時改抓 FK pose
+- `t` 單位 mm(全專案統一,與 `kinematics`/`safety` 一致;cv2 內部用 m,artifact write 時 ×1000)
+- `intrinsics_file` 是相對 repo root 的路徑;`intrinsics_rms_px` 是冗餘記錄(快速看「外參品質
+  + 內參品質一起記在 artifact 中」),`config/camera_intrinsics.json` 還是真理來源
+- `tool_version` 標 M0c-v1;未來改 PARK→TSAI、或重採 schema 改動時版本號 +1
+
+### 8.2.6 採點 SOP
+
+**前置**:
+1. 控制器啟動 + 設定 `TCP/二次開發模式`(finding 11)
+2. workbench 起、`status` 看 mode=5、Δ30004<0.1mm
+3. ChArUco 板**平放桌面**(可用書本/泡棉墊高至 ~30cm 工作距離),用膠帶/重物**固定不晃**
+4. 瀏覽器開 `http://<win-ip>:8000/handeye.html`,看 `ARM: ONLINE`、ChArUco overlay
+
+**採點循環**(每個 pose):
+1. workbench `move_l <x> <y> <z> <r> <speed>` 移到大致目標
+2. (可選)物理 unlock 進拖曳示教,手動微調姿態讓 board 在畫面中**佔比 > 30%**
+3. 退拖曳 → workbench `enable`(若退使能)→ 等手臂停穩
+4. 瀏覽器看 `corners: X/54` ≥ 30 + `mode=5 enabled=Y err=N` 確認
+5. **SPACE** → 抓 frame + arm pose 配對入 buffer(計數 +1)
+6. ESC/R/D 用法同 M0b(reset / discard last / 退出)
+
+**solve**(採滿 ≥15):
+7. 按 web UI 的 **Solve** 按鈕(或送 `{"action": "solve"}`)
+8. backend 跑 `calibrateHandEye(PARK)` → 算 residual_mm → 寫 `config/hand_eye.json`
+9. UI 顯示 `n_samples / rms_residual_mm / artifact_path`
+10. **rms_residual_mm < 2mm** = OK;否則重採(改善姿態散布、檢查板固定、確認 arm 在 SPACE 時 stable)
+
+**收尾**(同 workbench SOP 收尾 14-17):save 不需要(handeye 用 artifact)、disable、`q`。
+
+### 8.2.7 採點品質基準
+
+- **數量**:≥15 sample(`target_views = 15`,buffer 提示)
+- **XY 散布**:9 宮格各 ≥ 1 sample(對 base XY 平面,以板中心為原點 ±150mm 範圍切 3×3)
+- **r 變化**:至少 3 個不同 r 組(以 ±60° 為跨度)、同 r 不可超過 8 sample
+- **每張 corners_found ≥ 30**(≥ 50% 總角點,跟 M0b 同)
+- **arm stable**:SPACE 觸發時 `mode==5 && error==False`,UI 在 unstable 時顯示 ⚠ 但不擋
+- **rms_residual_mm**:< 2mm = OK、< 1mm = 優秀、≥ 5mm 重採
+
+### 8.2.8 設計決策一覽(本 PR 拍板)
+
+| 決策 | 選擇 | 理由 |
+|---|---|---|
+| 採點介面 | 擴充 calib.html / `viz/` 加 hand-eye mode | 沿用 M0b live stream + ChArUco overlay 基礎,操作員 SOP 一致;新增 endpoint + handeye.html、不動 calib.html |
+| 手臂移動方式 | workbench 手動 `move_l` 定點 + 拖曳微調 | T8/T9 已驗 motion path 穩;操作員可即時看畫面調姿態、最大彈性 |
+| 板固定方式 | 桌面平放(書本/泡棉墊高至工作距離) | 簡單、剛性最好;z=116mm safety 上限對 30cm 工作距離夠用 |
+| 採點觸發 | 操作員手動 SPACE | 跟 M0b SOP 同;留最後一道人工 sanity(arm stable + corners 數) |
+
+未拍板,留 M0c-1 plan 時決(不影響 §8.2 設計):
+- 採點數 buffer 上限(15 / 20 / 30?)
+- web/handeye.html 是否分離成獨立檔、或加 calib.html 的 mode switcher
+- arm 段 ws 推送頻率(跟 calib frame 同 5-10 fps,或單獨抽?)
+
+### 8.2.9 sanity verify hooks(銜接 M0d)
+
+M0c 收尾不做 verify(那是 M0d 範圍),但 §8.2 落地後 M0d 需要這條資料才能跑:
+
+```python
+# M0d 偽碼:已知物投影 vs 實放
+T_tcp_cam = load_hand_eye("config/hand_eye.json")  # ← M0c artifact
+T_base_tcp = pose_to_matrix(get_pose())            # ← 當下 TCP pose
+T_base_cam = T_base_tcp @ T_tcp_cam
+# 拍一張 ChArUco 板放已知 base 座標,projectPoints 板角點 → 期待與
+# 影像中的偵測角點 < 5mm error
+```
+
+→ M0d 額外只需 `scripts/handeye_verify.py`,不再動 viz/。
 
 ---
 
