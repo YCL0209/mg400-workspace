@@ -534,6 +534,84 @@ ImportError: cannot import name '_DmvSDK' from partially initialized module 'Dmv
 
 `partially initialized module` 訊息出現要先排 (1)–(3)，不要被字面的 "circular import" 誤導。
 
+### 27. **📝 JSON `NaN` 跨語言坑 — Python json.dumps 預設吐 bare `NaN`、瀏覽器 JSON.parse 炸 SyntaxError（2026-06-08 M0b-3 ws schema bug）**
+
+M0b-3 ws calib endpoint 寫 `calib_result` 訊息時，solve 失敗路徑送出帶 `rms_px=float("nan")` 的 dict 給 `ws.send_json`。Mac 端後端 log 全綠、Win 端前端 console 卻一直 `SyntaxError: Unexpected token N in JSON at position N`，再也跑不下去。
+
+**根因**：Python `json.dumps` **預設 `allow_nan=True`** → NaN 序列化成 bare literal `NaN`（不在引號裡、不是合法 JSON）：
+```python
+>>> import json
+>>> json.dumps({"rms_px": float("nan")})
+'{"rms_px": NaN}'           ← RFC 7159 非法
+>>> json.dumps({"rms_px": float("nan")}, allow_nan=False)
+ValueError: Out of range float values are not JSON compliant
+```
+
+瀏覽器 `JSON.parse` 嚴格按 RFC 7159 → 看到 `NaN` token 就 SyntaxError，整個 ws 訊息 drop、UI 停在最後一個有效訊息。
+
+**修法**（M0b-3 已 ship）：失敗路徑**整欄省略** `rms_px`（TypedDict `total=False` 設計，本來就允許缺欄位）。`CalibResultMessage` 失敗 = `{type, success=False, n_views, error}` 沒 `rms_px`。成功路徑保留有效 float。
+
+**反面教材**：硬塞 `None` / `null` 也可行，但 schema 變「有時是 number，有時是 null」，前端要多寫 `null` check。整欄省略更乾淨。
+
+**規範化**（M0c-1 入 unit test）：
+```python
+json.dumps(msg, allow_nan=False)  # raises on NaN -- assert in tests
+```
+tests/test_handeye_session.py 用這條把 stub solve result 釘住 → 任何未來 commit 加新欄位帶 NaN 會立即 fail。
+
+**Lesson**：跨語言訊息層必定要走 RFC 7159 strict。Python `allow_nan` 是預設給檔案級科學運算用的，**ws / API 邊界必須 explicit `allow_nan=False` 或省略 NaN 欄位**。M0c-3 solver 上線後也要照辦 — `rms_residual_mm` 失敗路徑同樣省略，不要送 NaN。
+
+### 28. **📏 z_max=116mm safety 上限是保守值、實機 195mm OK（2026-06-09 M0b 採點時觀察）**
+
+`config/safety.json` 的 `z_max_mm=116` 是 Phase 2b v1 「observed extreme」推估的，**不是 hard limit**。M0b 相機標定 + M0c 預計手眼校正都用到 z=140~195mm 範圍（板墊高到 30cm 工作距離 → 鏡頭 mount 高度 + 板高度 → 手臂目標 z 容易破 116）。
+
+**實機證據**（M0b 採點時實際送 MovL，控制器全 accept、無 alarm）：
+- z=140mm：accept、運動順
+- z=170mm：accept、運動順
+- z=195mm：accept、運動順
+- z=200mm：未測（保守起見）
+
+**為什麼 v1 寫 116**：Phase 2b v1 只採了 13 點，最高 z 樣本 `outer_front` 在 z=116mm 左右停（操作員主觀感覺「夠用」）。`calibrate_bounds v1` 演算法保守取 observed max。實際機構上限應該到約 200-220mm（伸距 440mm × J3 上仰 + J2 後仰幾何）。
+
+**現況不改**：M0c 採點時 workbench `move_l <x> <y> 140 0` 之類 z>116 的指令會被 safety gate 擋（`SafetyDecision.allowed=False`、`reason=ZAbove`）。當下 SOP：採點時暫時改 `config/safety.json` `z_max_mm=220`、結束後改回 116。**不是真正解法、需要 Phase 2b v3**。
+
+**Phase 2b v3（暫不啟動）**：
+1. 系統性 push J3 到上限（safety v1 J3 已開到 spec 105°），觀察「z 隨 J2/J3 怎麼變」
+2. 採 5-8 點 (J2 high + J3 high → z 高的 corner)
+3. 升級 `calibrate_bounds`，z_max 取「實機 alarm 觸發前一筆」（同 T7B 模式），不再靠 operator judgement
+4. v3 deploy 後 `z_max_mm` 可信任 = 不需 M0c 採點時暫改
+
+**Lesson**：safety bounds **observed extremes ≠ hard limits**。寫 config 時要明標 `_z_max_note: "observed P2b v1, true mech limit ~220mm pending v3"` 之類的 stale-warning，讓未來的 self 看到不會誤以為「safety 真的擋這麼嚴格」。M0c 期間若需要短期 override，至少加 commit comment 「臨時改 z_max for M0c, Phase 2b v3 真正解」。
+
+### 29. **🎯 M0b 採點 SOP — partial board / 9 宮格 + 傾斜變化（2026-06-08 / 09 實機驗證）**
+
+M0b-3 calib UI 上線後第一次採點 SOP 走完 45 views → rms=0.894 px、camera C1M6GM0W24460005，**結果優於 §8.1.6 的 1.0 px 基準**。記錄實際走通的採點手法供 M0c-1 / 未來重新校正參考。
+
+**Setup**（一次性）：
+- 鏡頭：DMV-CC1M6GM075、焦距 12mm 定焦
+- 工作距離：~30cm（板對鏡頭）
+- 板：A4 印 7×10 ChArUco（§8.1.1 spec）、紙板黏在桌面（保持平整）
+- 光圈/焦距調完後**鎖死止動環**（§8.1.5）
+
+**採點手法**（45 views）：
+1. **9 宮格 XY 散布**（基底 25 views）：把畫面切 3×3 = 9 區，每區拍 ~3 views，確保板中心至少 dwell 在那一區。
+2. **partial board 允許**（補 10 views）：邊角區故意拍**只露出 30-50% 板**（部分 marker 被裁掉）→ cv2.aruco.interpolateCornersCharuco 仍可從可見 marker 推 corners。**這條提升 cx/cy 精度**（畸變主要在邊緣）。
+3. **傾斜變化**（補 10 views）：每個 XY 區拍至少 1 view 把板**前傾/後傾/左傾/右傾 15-30°**。讓 K 解 fx/fy 不被「板恆鉛直」這個固定姿態鎖死。
+
+**過程指標**（前端 overlay 即時顯示）：
+- `corners` 數每張 ≥ 35（54 中的 65%）→ ok
+- `distance` 在 280-320mm 範圍 → 工作距離正確
+- 採滿 45 後按 Solve → 等 2-3 秒 → rms 顯示 0.894 px
+
+**為什麼 45 比 spec 的 20 多**：第一次採點對 partial-board 跟傾斜分布沒把握，多採當作 redundancy；rms 已 < 1.0 px、增量收斂明顯（30 views 時 rms 1.05、45 views 時 0.894）；之後熟練可降回 25-30 views。
+
+**M0c 套用差異**（partial board **不再適用**）：
+- M0c 板**整塊在畫面中**才能 PnP 解（partial 容易讓 board pose 估計不穩 → 影響手眼方程）
+- M0c 看 `corners ≥ 30` + 板**佔比 > 30%** + 操作員肉眼確認**整塊都看到**
+- M0c 不刻意傾斜（4 軸只有 yaw、傾斜變化來自 J1+J4 不同組合自然產生）
+
+**Lesson**：M0b 跟 M0c 採點目標不同 → SOP 不同。M0b 是「估 K + dist」、容忍 partial 換邊緣精度;M0c 是「估 T_tcp←cam」、要 full board PnP 穩定。同一介面（calib.html 跟 handeye.html）共用偵測碼但 SOP 分軌。
+
 ---
 
 ## FK 校驗資料(10 筆真實配對,法蘭中心,mm/deg)
