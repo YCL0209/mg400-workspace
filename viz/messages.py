@@ -50,13 +50,33 @@ class StateMessage(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 
 
-class CalibDetection(TypedDict):
-    """Per-frame ChArUco detection summary used by the live-preview overlay."""
+class BoardPose(TypedDict):
+    """Board origin pose in the camera frame (mm). Only present when K is loaded
+    and ``aruco.estimatePoseCharucoBoard`` succeeded for the current frame.
+
+    ``tz`` is the depth along the camera optical axis -- equals camera-to-board
+    distance when the board is roughly perpendicular to the lens. Operators use
+    it as a live distance readout to position the arm / board during M0c.
+    """
+
+    tx_mm: float
+    ty_mm: float
+    tz_mm: float
+
+
+class CalibDetection(TypedDict, total=False):
+    """Per-frame ChArUco detection summary used by the live-preview overlay.
+
+    ``board_pose`` is total=False -- omitted when intrinsics aren't loaded
+    yet (M0b-4 hasn't been run) or when cv2 can't solve pose this frame
+    (too few corners / degenerate geometry). Frontend renders "--" then.
+    """
 
     charuco_corners_found: int
     charuco_corners_total: int  # board's max corners = (squares_x-1) * (squares_y-1)
     board_visible: bool  # True iff at least one ArUco marker matched the board
     marker_ids: list  # detected ArUco IDs (empty when none)
+    board_pose: BoardPose  # only when intrinsics loaded + pose solved this frame
 
 
 class CalibCaptures(TypedDict):

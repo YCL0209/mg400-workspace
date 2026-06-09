@@ -40,15 +40,23 @@ except ImportError:
     aruco = None  # type: ignore[assignment]
     HAS_CV2 = False
 
+import json
+from pathlib import Path
+
 from robot_core.calibration.charuco import CHARUCO_BOARD, make_board
 
 from .calib_artifact import write_artifact
 from .messages import (
+    BoardPose,
     CalibActionMessage,
     CalibCaptures,
     CalibDetection,
     CalibFrameMessage,
     CalibResultMessage,
+)
+
+_DEFAULT_INTRINSICS_PATH = (
+    Path(__file__).resolve().parent.parent / "config" / "camera_intrinsics.json"
 )
 
 logger = logging.getLogger("viz.calib_session")
@@ -83,6 +91,9 @@ class CalibSession:
         jpeg_quality: int = _DEFAULT_JPEG_QUALITY,
         camera_serial: Optional[str] = None,
         artifact_path: Optional[object] = None,
+        intrinsics_K: Optional[object] = None,
+        intrinsics_dist: Optional[object] = None,
+        intrinsics_path: Optional[Path] = None,
     ) -> None:
         if not HAS_CV2:
             raise RuntimeError(
@@ -97,6 +108,20 @@ class CalibSession:
         # config/camera_intrinsics.json defined in calib_artifact.py.
         self.artifact_path = artifact_path
 
+        # Intrinsics for live board-pose estimation. Tests pass K + dist
+        # directly; production reads them from the saved artifact (M0b-4
+        # output) so the live distance readout works as soon as M0b-4
+        # finishes. None == no calibration yet, pose not emitted.
+        if intrinsics_K is not None:
+            self._K = np.asarray(intrinsics_K, dtype=np.float64)
+            self._dist = (
+                np.asarray(intrinsics_dist, dtype=np.float64)
+                if intrinsics_dist is not None
+                else np.zeros(5, dtype=np.float64)
+            )
+        else:
+            self._K, self._dist = self._try_load_intrinsics(intrinsics_path)
+
         # Detector / refiner -- created once so detection cost is amortised
         # across frames. cv2.aruco.ArucoDetector is the OpenCV 4.7+ class
         # API; pre-4.7 used free functions. requirements.txt pins >=4.10
@@ -108,11 +133,40 @@ class CalibSession:
         self._started_at_monotonic = time.monotonic()
         self._latest_image_size: Optional[tuple] = None
 
+    @staticmethod
+    def _try_load_intrinsics(intrinsics_path: Optional[Path]):
+        """Load K + dist from the saved artifact, or return (None, None).
+
+        Failure modes (missing file, malformed JSON) all degrade to None
+        rather than crash -- the operator may not have run M0b-4 yet, and
+        the calib session itself doesn't require intrinsics to work; it
+        just can't show the live distance.
+        """
+        path = intrinsics_path if intrinsics_path is not None else _DEFAULT_INTRINSICS_PATH
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            K = np.asarray(data["K"], dtype=np.float64)
+            dist = np.asarray(data["dist"], dtype=np.float64)
+            logger.info("loaded intrinsics from %s for live pose estimation", path)
+            return K, dist
+        except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError) as e:
+            logger.info(
+                "no usable intrinsics at %s (%s) -- live board pose disabled",
+                path,
+                type(e).__name__,
+            )
+            return None, None
+
     # ---- public state ------------------------------------------------------
 
     @property
     def collected(self) -> int:
         return len(self._samples)
+
+    @property
+    def has_intrinsics(self) -> bool:
+        return self._K is not None
 
     @property
     def latest_image_size(self) -> Optional[tuple]:
@@ -286,22 +340,46 @@ class CalibSession:
         corners, ids, _ = self._detector.detectMarkers(rgb)
         marker_ids: list = []
         n_charuco_corners = 0
+        ch_corners = None
+        ch_ids = None
         if ids is not None and len(ids):
             marker_ids = [int(i) for i in ids.flatten()]
             try:
-                n_charuco_corners, _, _ = aruco.interpolateCornersCharuco(
+                n_charuco_corners, ch_corners, ch_ids = aruco.interpolateCornersCharuco(
                     corners, ids, rgb, self.board
                 )
             except cv2.error:
                 n_charuco_corners = 0
 
-        detection = CalibDetection(
+        detection: CalibDetection = CalibDetection(
             charuco_corners_found=int(n_charuco_corners),
             charuco_corners_total=(self.board.getChessboardSize()[0] - 1)
             * (self.board.getChessboardSize()[1] - 1),
             board_visible=bool(marker_ids),
             marker_ids=marker_ids,
         )
+
+        # Live board pose: only if intrinsics loaded + enough corners. Pose
+        # estimation can fail (degenerate geometry, near-collinear corners);
+        # in that case we just omit board_pose for this frame so the
+        # frontend renders "--" without flicker.
+        if self._K is not None and n_charuco_corners >= 4 and ch_corners is not None:
+            try:
+                ok, rvec, tvec = aruco.estimatePoseCharucoBoard(
+                    ch_corners, ch_ids, self.board, self._K, self._dist, None, None
+                )
+            except cv2.error:
+                ok = False
+            if ok:
+                tx, ty, tz = (float(v) for v in tvec.flatten())
+                # cv2 returns metres (board square_size is metres); convert
+                # to mm for operator-readable output (matches our K matrix
+                # convention everywhere else).
+                detection["board_pose"] = BoardPose(
+                    tx_mm=tx * 1000.0,
+                    ty_mm=ty * 1000.0,
+                    tz_mm=tz * 1000.0,
+                )
 
         captures = CalibCaptures(collected=len(self._samples), target=self.target_views)
 

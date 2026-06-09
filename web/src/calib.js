@@ -19,6 +19,7 @@ const boardStatEl = $("board-stat");
 const cornersStatEl = $("corners-stat");
 const markersStatEl = $("markers-stat");
 const capturesStatEl = $("captures-stat");
+const distanceStatEl = $("distance-stat");
 const rmsStatEl = $("rms-stat");
 const logEl = $("log");
 
@@ -60,6 +61,18 @@ export function applyCalibFrame(msg) {
   capturesStatEl.textContent = `${cap.collected} / ${cap.target}`;
   capturesStatEl.className =
     "stat-value " + (cap.collected >= cap.target ? "ok" : "");
+
+  // board_pose is omitted (a) before calibration (no K loaded) or (b)
+  // when cv2 couldn't solve pose this frame. Render "--" in both cases
+  // so the operator doesn't see flicker between valid + missing frames.
+  const pose = det.board_pose;
+  if (pose && typeof pose.tz_mm === "number") {
+    distanceStatEl.textContent = `${pose.tz_mm.toFixed(1)} mm`;
+    distanceStatEl.className = "stat-value ok";
+  } else {
+    distanceStatEl.textContent = "—";
+    distanceStatEl.className = "stat-value";
+  }
 }
 
 export function applyCalibResult(msg) {

@@ -171,6 +171,35 @@ class TestCalibSession(unittest.TestCase):
     def test_unknown_action_is_logged_and_ignored(self):
         self.assertIsNone(self.session.apply_action({"action": "nuke"}))
 
+    def test_board_pose_absent_when_no_intrinsics_loaded(self):
+        """Pose estimation requires K; without it, board_pose key is omitted."""
+        msg = self._run(self.session.stream_frame())
+        self.assertNotIn("board_pose", msg["detection"])
+
+    def test_board_pose_present_when_intrinsics_injected(self):
+        """With K + dist injected and synthetic board frame, pose lands in detection."""
+        from viz.calib_session import CalibSession
+
+        fake_K = np.array(
+            [[800.0, 0.0, 400.0], [0.0, 800.0, 550.0], [0.0, 0.0, 1.0]]
+        )
+        fake_dist = np.zeros(5)
+        session = CalibSession(
+            camera=_FakeCamera(frames_to_yield=[self.synthetic_rgb] * 5),
+            board=self.board,
+            intrinsics_K=fake_K,
+            intrinsics_dist=fake_dist,
+        )
+        msg = self._run(session.stream_frame())
+        # Synthetic frame IS the board, so detection + pose should succeed.
+        self.assertIn("board_pose", msg["detection"])
+        pose = msg["detection"]["board_pose"]
+        for key in ("tx_mm", "ty_mm", "tz_mm"):
+            self.assertIn(key, pose)
+            self.assertIsInstance(pose[key], float)
+        # tz is depth -- positive in front of camera for a valid solve.
+        self.assertGreater(pose["tz_mm"], 0)
+
 
 class _FakeCamera:
     """Stand-in for DeltaCamera; yields canned frames + tracks open/close."""
