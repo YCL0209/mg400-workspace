@@ -124,3 +124,74 @@ class CalibResultMessage(TypedDict, total=False):
     dist: list  # [k1, k2, p1, p2, k3] -- only present on success
     artifact_path: str  # only present on success
     error: str  # only present on failure
+
+
+# ---------------------------------------------------------------------------
+# M0c hand-eye calibration messages (PHASE2 design §8.2.3)
+# ---------------------------------------------------------------------------
+
+
+class ArmStatePayload(TypedDict, total=False):
+    """Arm state captured alongside each frame for hand-eye sample pairing.
+
+    ``available=False`` means the backend has no live arm feed (no
+    RobotStateMonitor wired up yet, or first feedback frame hasn't arrived).
+    Frontend shows ``ARM: OFFLINE`` and warns on SPACE; backend records the
+    sample with arm_pose=None so the eventual solver can drop it (M0c-3).
+
+    When ``available=True``, ``pose`` / ``joints`` / ``mode`` / ``enabled``
+    / ``has_error`` reflect the most recent RobotStateSnapshot. ``pose`` is
+    derived from ``tool_vector_actual[:4]`` (x,y,z,r) -- the 4-axis MG400's
+    only TCP DoFs.
+    """
+
+    available: bool
+    pose: PoseDict
+    joints: list  # [j1, j2, j3, j4] -- 4-axis only, sliced from q_actual
+    mode: int  # RobotMode enum int (1..11)
+    enabled: bool
+    has_error: bool
+
+
+class HandeyeFrameMessage(TypedDict):
+    """Live frame + detection + arm state + capture progress.
+
+    Same shape as ``CalibFrameMessage`` plus an ``arm`` field. Reusing
+    ``CalibDetection`` and ``CalibCaptures`` keeps the schema (and the
+    detector pipeline) honest -- handeye and calib see the same board
+    through the same lens.
+    """
+
+    type: str  # always "handeye_frame"
+    jpeg_b64: str
+    timestamp_ms: int
+    detection: CalibDetection
+    arm: ArmStatePayload
+    captures: CalibCaptures
+
+
+# Action and result schemas are wire-compatible with calib's: actions are
+# just ``{"action": str}`` strings, results carry rms + artifact_path on
+# success or error on failure. Aliases keep the contract obvious in viz
+# code that imports from messages.
+HandeyeActionMessage = CalibActionMessage
+
+
+class HandeyeResultMessage(TypedDict, total=False):
+    """Hand-eye solve outcome (M0c-3 fills the real fields).
+
+    On success: ``R`` (3x3) + ``t`` (3-vec mm) + ``rms_residual_mm`` +
+    ``method`` + ``artifact_path``. On failure: ``success=False`` +
+    ``error`` + ``n_samples``. Same NaN-omission contract as
+    ``CalibResultMessage``: don't send NaN, browser JSON.parse chokes.
+    """
+
+    type: str  # always "handeye_result"
+    success: bool
+    n_samples: int
+    method: str  # e.g. "CALIB_HAND_EYE_PARK"
+    rms_residual_mm: float
+    R: list  # 3x3 nested list -- only on success
+    t: list  # [tx, ty, tz] mm -- only on success
+    artifact_path: str  # only on success
+    error: str  # only on failure
