@@ -83,11 +83,33 @@ def _default_calib_session_factory():
     return CalibSession(camera=cam, camera_serial=serial), cam
 
 
+def _default_handeye_session_factory():
+    """Production HandeyeSession: same camera setup as calib, no arm wired yet.
+
+    M0c-1 ships with ``arm_state=None`` -- the operator sees ``ARM:
+    OFFLINE`` until M0c-2 plugs a live ``RobotState`` (driven by an
+    ``AsyncFeedbackStream``) into this factory. Doing it this way means
+    Mac dev can exercise the full ws round-trip + ChArUco overlay without
+    needing a running arm.
+    """
+    from robot_core.camera import DeltaCamera
+
+    from .handeye_session import HandeyeSession
+
+    cfg = _load_viz_config()
+    serial = cfg.get("camera_serial")
+    cam = DeltaCamera(serial=serial)
+    cam.open()
+    cam.start_continuous()
+    return HandeyeSession(camera=cam, arm_state=None, camera_serial=serial), cam
+
+
 def create_app(
     *,
     bounds: SafetyBounds | None = None,
     grid_step_mm: float = 50.0,
     calib_session_factory: Optional[Callable] = None,
+    handeye_session_factory: Optional[Callable] = None,
 ) -> FastAPI:
     """Factory — accepts pre-loaded bounds for tests; production uses defaults.
 
@@ -109,6 +131,9 @@ def create_app(
 
     resolved_bounds = bounds if bounds is not None else SafetyBounds.load()
     resolved_calib_factory = calib_session_factory or _default_calib_session_factory
+    resolved_handeye_factory = (
+        handeye_session_factory or _default_handeye_session_factory
+    )
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
@@ -197,6 +222,73 @@ def create_app(
             except Exception:
                 pass
             logger.info("calib client disconnected, camera released")
+
+    @app.websocket("/ws/handeye")
+    async def ws_handeye(ws: WebSocket) -> None:
+        """Live hand-eye capture session for M0c-1 frontend.
+
+        Identical task structure to ``/ws/calib`` -- two coroutines (sender
+        + receiver), failure on either side cancels the other and releases
+        the camera. The only schema difference is each frame carries an
+        ``arm`` payload (``available=False`` until M0c-2 wires a live
+        ``RobotState`` into the factory).
+        """
+        await ws.accept()
+        try:
+            session, cleanup_target = resolved_handeye_factory()
+        except Exception as e:
+            logger.exception("handeye session init failed: %s", e)
+            await ws.send_json({
+                "type": "handeye_result",
+                "success": False,
+                "n_samples": 0,
+                "error": f"session init failed: {e}",
+            })
+            await ws.close()
+            return
+
+        logger.info("handeye client connected -- streaming frames")
+
+        async def sender() -> None:
+            while True:
+                msg = await session.stream_frame()
+                if msg is not None:
+                    await ws.send_json(msg)
+                await asyncio.sleep(_CALIB_FRAME_INTERVAL_S)
+
+        async def receiver() -> None:
+            while True:
+                raw = await ws.receive_text()
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.warning("handeye: bad JSON from client: %r", raw)
+                    continue
+                result = session.apply_action(payload)
+                if result is not None:
+                    await ws.send_json(result)
+
+        tasks = [asyncio.create_task(sender()), asyncio.create_task(receiver())]
+        try:
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_EXCEPTION
+            )
+            for t in pending:
+                t.cancel()
+            for t in done:
+                exc = t.exception()
+                if exc and not isinstance(exc, WebSocketDisconnect):
+                    logger.exception("handeye task crashed: %s", exc)
+        finally:
+            try:
+                cleanup_target.stop_continuous()
+            except Exception:
+                pass
+            try:
+                cleanup_target.close()
+            except Exception:
+                pass
+            logger.info("handeye client disconnected, camera released")
 
     return app
 
