@@ -4,11 +4,19 @@ A fake camera lets these run on Mac dev without DmvSDK; cv2 itself is
 required (the synthetic frame is drawn with cv2 and fed through the same
 detector + JPEG path the real camera takes). Tests that touch cv2.aruco
 skip cleanly when opencv-contrib-python is absent.
+
+solve() tests mock cv2.aruco.calibrateCameraCharuco -- running the real
+solver in a unit test would need many diverse synthetic views of the
+board which is heavy to fixture; integration accuracy is verified on
+hardware (Win-side smoke after merge).
 """
 
 import asyncio
 import base64
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -44,10 +52,18 @@ class TestCalibSession(unittest.TestCase):
         # CalibSession expects RGB; the board image is single-channel gray.
         self.synthetic_rgb = cv2.cvtColor(board_img, cv2.COLOR_GRAY2RGB)
 
-        self.fake_camera = _FakeCamera(frames_to_yield=[self.synthetic_rgb] * 10)
+        self.fake_camera = _FakeCamera(frames_to_yield=[self.synthetic_rgb] * 50)
+        self._tmp = tempfile.TemporaryDirectory()
         self.session = CalibSession(
-            camera=self.fake_camera, board=self.board, target_views=5
+            camera=self.fake_camera,
+            board=self.board,
+            target_views=5,
+            camera_serial="TEST-SN-001",
+            artifact_path=Path(self._tmp.name) / "camera_intrinsics.json",
         )
+
+    def tearDown(self):
+        self._tmp.cleanup()
 
     def _run(self, coro):
         return asyncio.get_event_loop().run_until_complete(coro)
@@ -101,19 +117,88 @@ class TestCalibSession(unittest.TestCase):
         self.assertEqual(result["type"], "calib_result")
         self.assertFalse(result["success"])
         self.assertIn("at least 3", result["error"])
+        self.assertNotIn("rms_px", result)  # NaN-omission contract
 
-    def test_solve_returns_stub_message_for_now(self):
-        """M0b-2 ships solver stub; M0b-4 fills in real cv2 call."""
+    def test_solve_with_enough_views_calls_cv2_and_writes_artifact(self):
+        """Real solve packages cv2 output + persists artifact to disk."""
         self._run(self.session.stream_frame())
-        for _ in range(4):
+        for _ in range(5):
             self.session.apply_action({"action": "capture"})
-        result = self.session.apply_action({"action": "solve"})
+
+        fake_K = np.array(
+            [[800.0, 0.0, 640.0], [0.0, 800.0, 360.0], [0.0, 0.0, 1.0]]
+        )
+        fake_dist = np.array([[0.1], [-0.05], [0.001], [0.002], [0.0]])
+        with patch(
+            "viz.calib_session.aruco.calibrateCameraCharuco",
+            return_value=(0.42, fake_K, fake_dist, [], []),
+        ) as mock_solver:
+            result = self.session.apply_action({"action": "solve"})
+
+        mock_solver.assert_called_once()
+        # Wire-protocol contract: success path carries K + dist + rms + path.
+        self.assertTrue(result["success"])
+        self.assertEqual(result["n_views"], 5)
+        self.assertAlmostEqual(result["rms_px"], 0.42)
+        self.assertEqual(len(result["K"]), 3)
+        self.assertEqual(len(result["dist"]), 5)  # flattened
+        self.assertIn("artifact_path", result)
+        # And the artifact actually landed on disk for M0c / M2 to read.
+        artifact_file = Path(result["artifact_path"])
+        self.assertTrue(artifact_file.exists())
+
+    def test_solve_handles_cv2_error_without_writing_artifact(self):
+        """If cv2 throws (typical: too few corners total), we propagate cleanly."""
+        import cv2
+
+        self._run(self.session.stream_frame())
+        for _ in range(5):
+            self.session.apply_action({"action": "capture"})
+
+        artifact_path = self.session.artifact_path
+        with patch(
+            "viz.calib_session.aruco.calibrateCameraCharuco",
+            side_effect=cv2.error("synthetic failure for test"),
+        ):
+            result = self.session.apply_action({"action": "solve"})
+
         self.assertFalse(result["success"])
-        self.assertIn("not implemented yet", result["error"])
-        self.assertEqual(result["n_views"], 4)
+        self.assertIn("cv2 solver failed", result["error"])
+        self.assertNotIn("rms_px", result)
+        # No artifact on solver failure.
+        self.assertFalse(artifact_path.exists())
 
     def test_unknown_action_is_logged_and_ignored(self):
         self.assertIsNone(self.session.apply_action({"action": "nuke"}))
+
+    def test_board_pose_absent_when_no_intrinsics_loaded(self):
+        """Pose estimation requires K; without it, board_pose key is omitted."""
+        msg = self._run(self.session.stream_frame())
+        self.assertNotIn("board_pose", msg["detection"])
+
+    def test_board_pose_present_when_intrinsics_injected(self):
+        """With K + dist injected and synthetic board frame, pose lands in detection."""
+        from viz.calib_session import CalibSession
+
+        fake_K = np.array(
+            [[800.0, 0.0, 400.0], [0.0, 800.0, 550.0], [0.0, 0.0, 1.0]]
+        )
+        fake_dist = np.zeros(5)
+        session = CalibSession(
+            camera=_FakeCamera(frames_to_yield=[self.synthetic_rgb] * 5),
+            board=self.board,
+            intrinsics_K=fake_K,
+            intrinsics_dist=fake_dist,
+        )
+        msg = self._run(session.stream_frame())
+        # Synthetic frame IS the board, so detection + pose should succeed.
+        self.assertIn("board_pose", msg["detection"])
+        pose = msg["detection"]["board_pose"]
+        for key in ("tx_mm", "ty_mm", "tz_mm"):
+            self.assertIn(key, pose)
+            self.assertIsInstance(pose[key], float)
+        # tz is depth -- positive in front of camera for a valid solve.
+        self.assertGreater(pose["tz_mm"], 0)
 
 
 class _FakeCamera:

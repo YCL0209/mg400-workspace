@@ -64,16 +64,23 @@ def _load_viz_config() -> dict:
 
 
 def _default_calib_session_factory():
-    """Production CalibSession: open DeltaCamera w/ configured serial, start continuous."""
+    """Production CalibSession: open DeltaCamera w/ configured serial, start continuous.
+
+    Threads the configured ``camera_serial`` through to CalibSession so the
+    eventual ``config/camera_intrinsics.json`` artifact records WHICH camera
+    its K matrix belongs to. Operators sharing a hub with multiple cameras
+    need this to know which calibration applies to which lens setup.
+    """
     from robot_core.camera import DeltaCamera
 
     from .calib_session import CalibSession
 
     cfg = _load_viz_config()
-    cam = DeltaCamera(serial=cfg.get("camera_serial"))
+    serial = cfg.get("camera_serial")
+    cam = DeltaCamera(serial=serial)
     cam.open()
     cam.start_continuous()
-    return CalibSession(camera=cam), cam
+    return CalibSession(camera=cam, camera_serial=serial), cam
 
 
 def create_app(

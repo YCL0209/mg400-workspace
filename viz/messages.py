@@ -50,13 +50,33 @@ class StateMessage(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 
 
-class CalibDetection(TypedDict):
-    """Per-frame ChArUco detection summary used by the live-preview overlay."""
+class BoardPose(TypedDict):
+    """Board origin pose in the camera frame (mm). Only present when K is loaded
+    and ``aruco.estimatePoseCharucoBoard`` succeeded for the current frame.
+
+    ``tz`` is the depth along the camera optical axis -- equals camera-to-board
+    distance when the board is roughly perpendicular to the lens. Operators use
+    it as a live distance readout to position the arm / board during M0c.
+    """
+
+    tx_mm: float
+    ty_mm: float
+    tz_mm: float
+
+
+class CalibDetection(TypedDict, total=False):
+    """Per-frame ChArUco detection summary used by the live-preview overlay.
+
+    ``board_pose`` is total=False -- omitted when intrinsics aren't loaded
+    yet (M0b-4 hasn't been run) or when cv2 can't solve pose this frame
+    (too few corners / degenerate geometry). Frontend renders "--" then.
+    """
 
     charuco_corners_found: int
     charuco_corners_total: int  # board's max corners = (squares_x-1) * (squares_y-1)
     board_visible: bool  # True iff at least one ArUco marker matched the board
     marker_ids: list  # detected ArUco IDs (empty when none)
+    board_pose: BoardPose  # only when intrinsics loaded + pose solved this frame
 
 
 class CalibCaptures(TypedDict):
@@ -88,7 +108,13 @@ class CalibActionMessage(TypedDict):
 
 
 class CalibResultMessage(TypedDict, total=False):
-    """Solve outcome (M0b-4 will populate ``K`` / ``dist``)."""
+    """Solve outcome.
+
+    On success, all numeric fields are present + ``artifact_path`` points
+    at the saved ``config/camera_intrinsics.json``. On failure, only
+    ``success=False`` + ``error`` + ``n_views`` are set (``rms_px``
+    intentionally omitted; sending NaN breaks browser JSON.parse).
+    """
 
     type: str  # always "calib_result"
     success: bool
@@ -96,4 +122,5 @@ class CalibResultMessage(TypedDict, total=False):
     rms_px: float
     K: list  # 3x3 nested list -- only present on success
     dist: list  # [k1, k2, p1, p2, k3] -- only present on success
+    artifact_path: str  # only present on success
     error: str  # only present on failure
