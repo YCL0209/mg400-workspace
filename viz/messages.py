@@ -178,17 +178,24 @@ HandeyeActionMessage = CalibActionMessage
 
 
 class HandeyeResultMessage(TypedDict, total=False):
-    """Hand-eye solve outcome (M0c-3 fills the real fields).
+    """Hand-eye solve outcome.
 
     On success: ``R`` (3x3) + ``t`` (3-vec mm) + ``rms_residual_mm`` +
     ``method`` + ``artifact_path``. On failure: ``success=False`` +
-    ``error`` + ``n_samples``. Same NaN-omission contract as
-    ``CalibResultMessage``: don't send NaN, browser JSON.parse chokes.
+    ``error`` + ``n_samples`` + ``n_samples_dropped``. Same NaN-omission
+    contract as ``CalibResultMessage``: don't send NaN, browser JSON.parse
+    chokes (finding 27).
+
+    ``n_samples`` is the count actually fed into the solver (after
+    arm-pose / detection filtering). ``n_samples_dropped`` is the count
+    excluded -- frontend can show "12 used, 3 dropped" so the operator
+    knows the captured buffer wasn't fully consumed.
     """
 
     type: str  # always "handeye_result"
     success: bool
-    n_samples: int
+    n_samples: int  # number fed to cv2.calibrateHandEye (after filter)
+    n_samples_dropped: int  # samples excluded (arm offline / PnP failed)
     method: str  # e.g. "CALIB_HAND_EYE_PARK"
     rms_residual_mm: float
     R: list  # 3x3 nested list -- only on success
