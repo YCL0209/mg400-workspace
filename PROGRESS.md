@@ -612,6 +612,84 @@ M0b-3 calib UI 上線後第一次採點 SOP 走完 45 views → rms=0.894 px、c
 
 **Lesson**：M0b 跟 M0c 採點目標不同 → SOP 不同。M0b 是「估 K + dist」、容忍 partial 換邊緣精度;M0c 是「估 T_tcp←cam」、要 full board PnP 穩定。同一介面（calib.html 跟 handeye.html）共用偵測碼但 SOP 分軌。
 
+### 30. **🧬 30004 feedback raw dtype field 名是 CamelCase、parse_feedback 才轉 snake_case（2026-06-10 M0c-2 lifespan test 採坑）**
+
+寫 M0c-2 lifespan 整合測試的 fake feedback frame 時,想直接用 numpy 寫一個 1440-byte buffer 餵 `_FakeStreamReader`:
+
+```python
+frame = np.zeros(1, dtype=FEEDBACK_DTYPE)
+frame[0]["enable_status"] = 1   # ← ValueError: no field of name enable_status
+```
+
+**根因**:`FEEDBACK_DTYPE`(`robot_core/transport/feedback.py:106`)的 field 名跟 Dobot SDK doc 完全一致,用 **CamelCase**:`EnableStatus`、`ErrorStatus`、`BrakeStatus`、`DragStatus`、`RunningStatus`、`JogStatus`、`SixForceOnline`、`RobotType` 等。這是真 dtype 的事實。
+
+`FeedbackFrame` dataclass(line 161)+ `parse_feedback()`(line 233 系列)才把它 map 成 snake_case `enable_status` / `error_status` 給上層用:
+```python
+return FeedbackFrame(
+    robot_mode=int(frame["robot_mode"][0][0]),
+    enable_status=int(frame["EnableStatus"][0][0]),  # ← 注意這條
+    error_status=int(frame["ErrorStatus"][0][0]),
+    ...
+)
+```
+
+(`robot_mode` / `q_actual` / `tool_vector_actual` 等小寫的 field 在原 dtype 就是 snake_case,因為 SDK doc 那段也用小寫。CamelCase 的是 Dobot 後加的擴充欄位。)
+
+**修法(寫測試的人):** 直接寫 raw bytes 時用 **CamelCase**(`frame[0]["EnableStatus"] = 1`);消費 `FeedbackFrame` 物件時用 **snake_case**(`snap.enable_status`)。
+
+**Diagnostic 順序**(寫 raw feedback fixture 時):
+1. `print(FEEDBACK_DTYPE.names)` 看真實 field 名
+2. 對照 `parse_feedback()` 的 map 規則(line 233 系列)知 dtype ↔ dataclass 兩邊的 naming 差
+3. 不要假設 dataclass 屬性名 = dtype field 名
+
+**Lesson**:`FEEDBACK_DTYPE` 是 wire 真理(對 SDK doc),`FeedbackFrame` 是 Python 風格門面;兩邊 naming 不一致是設計選擇,不是 bug。fixture / mock 寫到哪邊,name 就跟到那邊。
+
+### 31. **🪤 fake async stream 沒 `await` 點 → producer task busy-loop → monitor.stop() 永遠 cancel 不到(2026-06-10 M0c-2 lifespan test 採坑)**
+
+M0c-2 lifespan 整合測試一開始走 `TestClient(app) as client` + `with client.websocket_connect("/ws/handeye")`,跑下去 **hang forever**。Ctrl-C 之外什麼訊號都沒。
+
+**根因**:`AsyncFeedbackStream` 接的 mock `StreamReader` 寫成這樣:
+
+```python
+class _FakeStreamReader:
+    async def readexactly(self, n: int) -> bytes:
+        # 沒有 await !!
+        while len(self._buf) < n:
+            self._buf += self._payload
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+```
+
+雖然標 `async def`,**整個 function body 沒任何 await**。Python 對「async def 內無 await」是合法的(會吐 coroutine、馬上完成),但 `RobotStateMonitor._produce` 跑 `async for frame in self._stream.frames():` 時,每一輪都呼叫這個 `readexactly` 而沒回讓 event loop → producer task **busy-loop** 把所有 wall clock 吃光。
+
+`monitor.stop()` 呼叫的 `producer.cancel()` 把 CancelledError 排進 task,**但 task 永遠沒 yield 點**讓 event loop 把 cancel 派發進去。`await task` 因此永遠等不到 cancellation 被觀察到。
+
+**修法**:fake reader 的 `readexactly` 內加 `await asyncio.sleep(0)`:
+```python
+async def readexactly(self, n: int) -> bytes:
+    await asyncio.sleep(0)   # ← yield 控制權給 event loop,讓 cancel 可插入
+    while len(self._buf) < n:
+        self._buf += self._payload
+    out, self._buf = self._buf[:n], self._buf[n:]
+    return out
+```
+
+`sleep(0)` 等同「不睡、只是讓 scheduler 跑下一輪」,本機跑幾百 frames 一毫秒,測試仍快。
+
+**順手做的二度修法**:M0c-2 lifespan 成功 path 測試本來用 `TestClient + ws round-trip`,但 Starlette 在 lifespan shutdown 跟 ws cancel 互動有 brittle path,改用:
+```python
+class TestArmLifespanSuccess(unittest.IsolatedAsyncioTestCase):
+    async def test_holder_filled_during_lifespan_and_cleared_after(self):
+        async with app.router.lifespan_context(app):
+            ...  # 直接驅動 lifespan、不經 TestClient 也不開 ws
+```
+這條 pattern 適合「測試 lifespan 邏輯而非端對端 ws 行為」的場景。
+
+**Lesson**:
+1. `async def` 不等於「會 yield」,**必須體內有 await**才會。寫 mock async I/O 一定要至少一個 await(`sleep(0)` 最便宜)。
+2. `Task.cancel()` 是 cooperative,需要 task 主動回到 event loop 才能觀察到;CPU-bound busy-loop 在 async 世界等同永遠不死(不像 thread 有 preemption)。
+3. 端對端整合測試(TestClient + lifespan + ws)brittle path 太多時,**換層級**:測 lifespan 邏輯就用 `lifespan_context` 直接驅動,測 ws schema 就 mock 掉 lifespan、注 factory。
+
 ---
 
 ## FK 校驗資料(10 筆真實配對,法蘭中心,mm/deg)
