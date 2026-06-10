@@ -24,7 +24,11 @@ class TestVizWsEndpoint(unittest.TestCase):
     def setUp(self):
         from viz.server import create_app
 
-        self.app = create_app(bounds=_sample_bounds(), grid_step_mm=50.0)
+        self.app = create_app(
+            bounds=_sample_bounds(),
+            grid_step_mm=50.0,
+            enable_arm_lifespan=False,
+        )
         self.client = TestClient(self.app)
 
     def test_ws_emits_workspace_on_connect(self):

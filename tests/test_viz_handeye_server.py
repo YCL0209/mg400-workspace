@@ -60,6 +60,7 @@ class TestWsHandeyeEndpoint(unittest.TestCase):
             bounds=_sample_bounds(),
             grid_step_mm=50.0,
             handeye_session_factory=factory,
+            enable_arm_lifespan=False,
         )
         self.client = TestClient(self.app)
 

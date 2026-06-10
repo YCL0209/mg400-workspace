@@ -4,10 +4,20 @@ M1 endpoint: ``GET /ws`` accepts a WebSocket, sends one ``WorkspaceMessage``,
 then keeps the connection open until the client disconnects. No state/FOV/
 detection traffic until M2/M3.
 
+M0c-2 adds an application lifespan handler that opens an
+:class:`AsyncFeedbackStream` to the arm's 30004 port and drives a
+:class:`RobotState` via :class:`RobotStateMonitor`. The resolved state
+flows into ``/ws/handeye`` so the operator sees ``ARM: ONLINE`` and
+SPACE captures pair frames with live TCP poses. Mac dev without an arm
+gets ``ARM: OFFLINE`` (connect fails fast at the configured timeout, or
+disable entirely with ``MG400_VIZ_ARM=0``).
+
 Configuration: ``SafetyBounds`` loads from ``config/safety.json`` (default
 path); host/port/grid_step come from ``config/robot.json`` ``viz`` section
 with ``MG400_VIZ_HOST`` / ``MG400_VIZ_PORT`` / ``MG400_VIZ_GRID_STEP_MM`` env
-overrides (same convention as transport/feedback ports — CLAUDE.md line 103).
+overrides. Arm endpoint comes from the same JSON's top-level ``ip`` and
+``ports.feedback`` (+ ``transport.connect_timeout_s``) with the existing
+``MG400_IP`` / ``MG400_FEEDBACK_PORT`` overrides honoured.
 """
 
 from __future__ import annotations
@@ -16,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -23,6 +34,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from robot_core.safety.bounds import SafetyBounds
+from robot_core.state import RobotState
+from robot_core.state.monitor import RobotStateMonitor
+from robot_core.transport import AsyncFeedbackStream
 
 from .workspace import build_workspace_message
 
@@ -83,25 +97,71 @@ def _default_calib_session_factory():
     return CalibSession(camera=cam, camera_serial=serial), cam
 
 
-def _default_handeye_session_factory():
-    """Production HandeyeSession: same camera setup as calib, no arm wired yet.
+def _default_handeye_session_factory_with_arm(arm_state_holder: dict) -> Callable:
+    """Build a factory that injects the lifespan-resolved RobotState.
 
-    M0c-1 ships with ``arm_state=None`` -- the operator sees ``ARM:
-    OFFLINE`` until M0c-2 plugs a live ``RobotState`` (driven by an
-    ``AsyncFeedbackStream``) into this factory. Doing it this way means
-    Mac dev can exercise the full ws round-trip + ChArUco overlay without
-    needing a running arm.
+    Returns a zero-arg callable producing ``(HandeyeSession, camera)``.
+    Reading ``arm_state_holder["state"]`` at call time (per ws connect)
+    means a delayed startup or future hot-reconnect could be picked up
+    by new clients without recreating the factory.
     """
     from robot_core.camera import DeltaCamera
 
     from .handeye_session import HandeyeSession
 
-    cfg = _load_viz_config()
-    serial = cfg.get("camera_serial")
-    cam = DeltaCamera(serial=serial)
-    cam.open()
-    cam.start_continuous()
-    return HandeyeSession(camera=cam, arm_state=None, camera_serial=serial), cam
+    def factory():
+        cfg = _load_viz_config()
+        serial = cfg.get("camera_serial")
+        cam = DeltaCamera(serial=serial)
+        cam.open()
+        cam.start_continuous()
+        session = HandeyeSession(
+            camera=cam,
+            arm_state=arm_state_holder["state"],
+            camera_serial=serial,
+        )
+        return session, cam
+
+    return factory
+
+
+def _load_arm_endpoint_config() -> dict:
+    """Read arm host/feedback_port/connect_timeout for the M0c-2 lifespan.
+
+    Reads ``config/robot.json`` top-level ``ip``, ``ports.feedback``, and
+    ``transport.connect_timeout_s``. Env vars override the file values
+    using the same names as the rest of the project (``MG400_IP`` /
+    ``MG400_FEEDBACK_PORT`` per CLAUDE.md build/test section).
+    """
+    cfg = {"ip": "192.168.1.6", "feedback_port": 30004, "connect_timeout_s": 3.0}
+    try:
+        with open(_DEFAULT_ROBOT_JSON, encoding="utf-8") as fh:
+            data = json.load(fh)
+        cfg["ip"] = data.get("ip", cfg["ip"])
+        cfg["feedback_port"] = (
+            data.get("ports", {}).get("feedback", cfg["feedback_port"])
+        )
+        cfg["connect_timeout_s"] = (
+            data.get("transport", {}).get("connect_timeout_s", cfg["connect_timeout_s"])
+        )
+    except FileNotFoundError:
+        logger.warning("config/robot.json missing -- using arm endpoint defaults")
+
+    if v := os.environ.get("MG400_IP"):
+        cfg["ip"] = v
+    if v := os.environ.get("MG400_FEEDBACK_PORT"):
+        cfg["feedback_port"] = int(v)
+    return cfg
+
+
+def _arm_lifespan_enabled() -> bool:
+    """``MG400_VIZ_ARM=0/false/no/off`` disables the lifespan connect attempt.
+
+    Useful for Mac dev when no arm is reachable -- skips the timeout-bound
+    wait at startup and goes straight to ARM: OFFLINE. Default on.
+    """
+    val = os.environ.get("MG400_VIZ_ARM", "1").lower()
+    return val not in ("0", "false", "no", "off")
 
 
 def create_app(
@@ -110,6 +170,7 @@ def create_app(
     grid_step_mm: float = 50.0,
     calib_session_factory: Optional[Callable] = None,
     handeye_session_factory: Optional[Callable] = None,
+    enable_arm_lifespan: bool = True,
 ) -> FastAPI:
     """Factory — accepts pre-loaded bounds for tests; production uses defaults.
 
@@ -117,8 +178,94 @@ def create_app(
     cleanup_target is whatever needs ``stop_continuous() + close()`` on
     disconnect (the camera, in production). Tests pass fakes here so unit
     tests run without DmvSDK.
+
+    ``enable_arm_lifespan`` toggles the M0c-2 startup hook that opens the
+    arm feedback stream + RobotState. Tests almost always pass ``False``
+    so unit suites don't try to reach 192.168.1.6 during ``TestClient``
+    boot (TestClient runs lifespan by default; without the toggle that
+    would hang for ``connect_timeout_s`` per test). The dedicated
+    lifespan tests pass ``True`` and inject a fake stream opener.
     """
-    app = FastAPI(title="MG400 inspection viz", version="0.2.0-m0b")
+    # Closure shared by lifespan + the default handeye factory. Lifespan
+    # writes the resolved arm state into ``holder["state"]`` on startup
+    # success; the factory reads it when a ws client connects. Using a
+    # dict rather than a nonlocal var lets the factory close cleanly over
+    # a mutable cell (Python doesn't allow reassigning closed-over names
+    # without ``nonlocal``, and the factory may be passed around / tested).
+    arm_state_holder: dict = {"state": None, "monitor": None, "stream": None}
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Open arm feedback + RobotState on startup; tear down on shutdown.
+
+        Graceful degradation: any failure (timeout, connection refused,
+        env-var off) logs a warning and lets the app come up with
+        ``arm_state_holder["state"] = None``. Operators see ARM: OFFLINE
+        rather than the server refusing to boot.
+        """
+        if not enable_arm_lifespan:
+            logger.info(
+                "arm lifespan disabled (enable_arm_lifespan=False) -- ARM: OFFLINE"
+            )
+            yield
+            return
+        if not _arm_lifespan_enabled():
+            logger.info("MG400_VIZ_ARM disabled in env -- ARM: OFFLINE")
+            yield
+            return
+
+        arm_cfg = _load_arm_endpoint_config()
+        stream = AsyncFeedbackStream(
+            arm_cfg["ip"],
+            arm_cfg["feedback_port"],
+            connect_timeout_s=arm_cfg["connect_timeout_s"],
+        )
+        try:
+            await stream.connect()
+        except (OSError, asyncio.TimeoutError) as e:
+            # Note: asyncio.wait_for wraps the inner OpenError as
+            # TimeoutError on timeout; bare OSError covers refused/no-route.
+            logger.warning(
+                "arm feedback connect to %s:%d failed (%s) -- ARM: OFFLINE",
+                arm_cfg["ip"],
+                arm_cfg["feedback_port"],
+                e,
+            )
+            await stream.close()
+            yield
+            return
+
+        state = RobotState()
+        monitor = RobotStateMonitor(stream, state)
+        monitor.start()
+        arm_state_holder["state"] = state
+        arm_state_holder["monitor"] = monitor
+        arm_state_holder["stream"] = stream
+        logger.info(
+            "arm feedback stream started at %s:%d -- ARM: ONLINE",
+            arm_cfg["ip"],
+            arm_cfg["feedback_port"],
+        )
+        try:
+            yield
+        finally:
+            try:
+                await monitor.stop()
+            except Exception as e:
+                logger.warning("arm monitor stop failed: %s", e)
+            arm_state_holder["state"] = None
+            arm_state_holder["monitor"] = None
+            arm_state_holder["stream"] = None
+            logger.info("arm feedback stream stopped")
+
+    app = FastAPI(
+        title="MG400 inspection viz", version="0.3.0-m0c-2", lifespan=lifespan
+    )
+    # Expose the holder via app.state so tests + future debugging endpoints
+    # can introspect whether the arm came up cleanly. Production code
+    # doesn't need this -- the handeye factory closes over the same
+    # holder via the closure above.
+    app.state.arm_state_holder = arm_state_holder
     # Vite dev server runs on :5173; ws upgrades aren't CORS-checked by
     # browsers, but having permissive CORS lets future REST endpoints (M3
     # phase5-panel POST detections) work without per-route headers.
@@ -131,8 +278,8 @@ def create_app(
 
     resolved_bounds = bounds if bounds is not None else SafetyBounds.load()
     resolved_calib_factory = calib_session_factory or _default_calib_session_factory
-    resolved_handeye_factory = (
-        handeye_session_factory or _default_handeye_session_factory
+    resolved_handeye_factory = handeye_session_factory or (
+        _default_handeye_session_factory_with_arm(arm_state_holder)
     )
 
     @app.websocket("/ws")
